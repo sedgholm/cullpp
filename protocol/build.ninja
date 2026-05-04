@@ -1,0 +1,41 @@
+rule scanner_header
+  command = wayland-scanner client-header $in $out
+  description = SCAN-HDR $out
+
+rule scanner_code
+  command = wayland-scanner private-code $in $out
+  description = SCAN-C $out
+
+rule patch_wlr_header
+  command = perl -0pi -e 's/const char \*namespace\)/const char *namespace_arg)/g; s/layer, namespace\);/layer, namespace_arg);/g' $in && touch $out
+  description = PATCH $in
+
+build wlr-layer-shell-unstable-v1-client-protocol.h: scanner_header wlr-layer-shell-unstable-v1.xml
+build wlr-layer-shell-unstable-v1-client-protocol.stamp: patch_wlr_header wlr-layer-shell-unstable-v1-client-protocol.h
+build wlr-layer-shell-unstable-v1-protocol.c: scanner_code wlr-layer-shell-unstable-v1.xml
+
+build xdg-output-unstable-v1-client-protocol.h: scanner_header xdg-output-unstable-v1.xml
+build xdg-output-unstable-v1-protocol.c: scanner_code xdg-output-unstable-v1.xml
+
+build cursor-shape-v1-client-protocol.h: scanner_header cursor-shape-v1.xml
+build cursor-shape-v1-protocol.c: scanner_code cursor-shape-v1.xml
+
+build xdg-shell-client-protocol.h: scanner_header xdg-shell.xml
+build xdg-shell-protocol.c: scanner_code xdg-shell.xml
+
+build tablet-unstable-v2-client-protocol.h: scanner_header tablet-unstable-v2.xml
+build tablet-unstable-v2-protocol.c: scanner_code tablet-unstable-v2.xml
+
+build all: phony $
+  wlr-layer-shell-unstable-v1-client-protocol.stamp $
+  wlr-layer-shell-unstable-v1-protocol.c $
+  xdg-output-unstable-v1-client-protocol.h $
+  xdg-output-unstable-v1-protocol.c $
+  cursor-shape-v1-client-protocol.h $
+  cursor-shape-v1-protocol.c $
+  xdg-shell-client-protocol.h $
+  xdg-shell-protocol.c $
+  tablet-unstable-v2-client-protocol.h $
+  tablet-unstable-v2-protocol.c
+
+default all
