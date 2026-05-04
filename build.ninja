@@ -18,7 +18,7 @@ rule link
   command = c++ $in -o $out $ldflags
 
 rule install
-  command = cp cullpp /usr/local/bin/ && cp cullpp.1 /usr/local/share/man/man1/
+  command = cp cullpp /usr/local/bin/
 
 build $builddir/main.o: cxx main.cpp
 build $builddir/shm_pool.o: cxx shm_pool.cpp
