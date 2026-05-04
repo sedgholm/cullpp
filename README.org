@@ -5,7 +5,7 @@
 
 Interactive region selector for wlroots-based Wayland compositors. Outputs geometry data to stdout for integration with screenshot, recording, and window management tools or custom scripts.
 
-[[https://img.shields.io/badge/Wayland v1.0+-yellow.svg]]
+[[https://img.shields.io/badge/Wayland-v1.0+-yellow.svg]]
 [[https://img.shields.io/badge/C%2B%2B17-purple.svg]]
 
 
