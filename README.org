@@ -24,7 +24,7 @@ Dependencies:
 - ~wayland-cursor~
 - ~cairo~
 - ~xkbcommon~
-- generated protocol sources in ~protocol/~ must be present
+- generated protocol sources in ~out/protocol~ must be present
 
 Build w Ninja:
 #+begin_src sh
