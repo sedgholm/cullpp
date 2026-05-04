@@ -1,8 +1,14 @@
 builddir = out
-commonflags = -O2 -Wall -Wextra -Iprotocol $$(pkg-config --cflags wayland-client wayland-cursor xkbcommon cairo)
+commonflags = -O2 -Wall -Wextra -I$builddir/protocol -Iprotocol $$(pkg-config --cflags wayland-client wayland-cursor xkbcommon cairo)
 cflags = $commonflags
 cppflags = -std=c++17 $commonflags
 ldflags = $$(pkg-config --libs wayland-client wayland-cursor xkbcommon cairo)
+
+rule scanner_header
+  command = sh -c 'mkdir -p "$$(dirname "$$2")" && wayland-scanner client-header "$$1" "$$2"' sh $in $out
+
+rule scanner_code
+  command = sh -c 'mkdir -p "$$(dirname "$$2")" && wayland-scanner private-code "$$1" "$$2"' sh $in $out
 
 rule cc
   command = cc -MMD -MF $out.d $cflags -c $in -o $out
@@ -20,14 +26,28 @@ rule link
 rule install
   command = cp cullpp /usr/local/bin/
 
-build $builddir/main.o: cxx main.cpp
+build $builddir/protocol/wlr-layer-shell-unstable-v1-client-protocol.h: scanner_header protocol/wlr-layer-shell-unstable-v1.xml
+build $builddir/protocol/wlr-layer-shell-unstable-v1-protocol.c: scanner_code protocol/wlr-layer-shell-unstable-v1.xml
+build $builddir/protocol/xdg-output-unstable-v1-client-protocol.h: scanner_header protocol/xdg-output-unstable-v1.xml
+build $builddir/protocol/xdg-output-unstable-v1-protocol.c: scanner_code protocol/xdg-output-unstable-v1.xml
+build $builddir/protocol/cursor-shape-v1-client-protocol.h: scanner_header protocol/cursor-shape-v1.xml
+build $builddir/protocol/cursor-shape-v1-protocol.c: scanner_code protocol/cursor-shape-v1.xml
+build $builddir/protocol/xdg-shell-client-protocol.h: scanner_header protocol/xdg-shell.xml
+build $builddir/protocol/xdg-shell-protocol.c: scanner_code protocol/xdg-shell.xml
+build $builddir/protocol/tablet-unstable-v2-client-protocol.h: scanner_header protocol/tablet-unstable-v2.xml
+build $builddir/protocol/tablet-unstable-v2-protocol.c: scanner_code protocol/tablet-unstable-v2.xml
+
+build $builddir/main.o: cxx main.cpp || $
+  $builddir/protocol/wlr-layer-shell-unstable-v1-client-protocol.h $
+  $builddir/protocol/xdg-output-unstable-v1-client-protocol.h $
+  $builddir/protocol/cursor-shape-v1-client-protocol.h
 build $builddir/shm_pool.o: cxx shm_pool.cpp
 
-build $builddir/wlr-layer-shell-unstable-v1-protocol.o: cc protocol/wlr-layer-shell-unstable-v1-protocol.c
-build $builddir/xdg-output-unstable-v1-protocol.o: cc protocol/xdg-output-unstable-v1-protocol.c
-build $builddir/cursor-shape-v1-protocol.o: cc protocol/cursor-shape-v1-protocol.c
-build $builddir/xdg-shell-protocol.o: cc protocol/xdg-shell-protocol.c
-build $builddir/tablet-unstable-v2-protocol.o: cc protocol/tablet-unstable-v2-protocol.c
+build $builddir/wlr-layer-shell-unstable-v1-protocol.o: cc $builddir/protocol/wlr-layer-shell-unstable-v1-protocol.c
+build $builddir/xdg-output-unstable-v1-protocol.o: cc $builddir/protocol/xdg-output-unstable-v1-protocol.c
+build $builddir/cursor-shape-v1-protocol.o: cc $builddir/protocol/cursor-shape-v1-protocol.c
+build $builddir/xdg-shell-protocol.o: cc $builddir/protocol/xdg-shell-protocol.c
+build $builddir/tablet-unstable-v2-protocol.o: cc $builddir/protocol/tablet-unstable-v2-protocol.c
 
 build cullpp: link $
   $builddir/main.o $
