@@ -673,7 +673,7 @@ int main(int argc, char* argv[]) {
         else if (!strcmp(argv[i],"-v")) st.verbose=true;
         else if (!strcmp(argv[i],"-h")||!strcmp(argv[i],"--help")) {
             fprintf(stderr,
-                "Usage: cullpp [options...]\n"
+                "Usage: cullpp " CULLPP_VERSION " [options...]\n"
                 "\n"
                 "  -f FORMAT  output format  %%x %%y %%w %%h %%X %%Y %%o %%l\n"
                 "  -d         dimension overlay\n"
