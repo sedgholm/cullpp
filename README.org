@@ -115,3 +115,5 @@ printf '0,0 1920x1080 left\n1920,0 1920x1080 right\n' | cullpp -r
   and drag-across-monitor flows on your compositor before publishing a release.
 - If you use command substitution, the printed result is emitted after the
   Wayland teardown path completes.
+
+* License under MIT
