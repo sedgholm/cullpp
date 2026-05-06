@@ -1,9 +1,10 @@
-# cullpp
 
-Interactive region selector for wlroots-based Wayland compositors. Outputs geometry data to stdout for integration with screenshot, recording, and window management tools or custom scripts.
+![cullpp](https://codeberg.org/attachments/6a9613b7-b1e6-4850-80e5-37e950d6bf28)
 
 ![Wayland](https://img.shields.io/badge/Wayland-v1.0+-yellow.svg)
 ![C++17](https://img.shields.io/badge/C%2B%2B17-purple.svg)
+
+Interactive region selector for wlroots-based Wayland compositors. Outputs geometry data to stdout for integration with screenshot, recording, and window management tools or custom scripts.
 
 ## Current design goals
 
