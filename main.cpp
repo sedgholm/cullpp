@@ -167,7 +167,7 @@ static void render(Output* out) {
      
     cairo_set_antialias(cr, CAIRO_ANTIALIAS_NONE);
     cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
-    cairo_set_source_rgba(cr, 0.02, 0.03, 0.04, 0.34);
+    cairo_set_source_rgba(cr, 0.29, 0.29, 0.29, 0.34);
     cairo_paint(cr);
 
     for (const auto& sn : st->snaps) {
@@ -195,7 +195,7 @@ static void render(Output* out) {
         const double rh = st->sel.h;
 
         cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
-        cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.015);
+        cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.000);
         cairo_rectangle(cr, rx, ry, rw, rh);
         cairo_fill(cr);
 
@@ -205,6 +205,7 @@ static void render(Output* out) {
         cairo_rectangle(cr, rx+0.625, ry+0.625, rw-1.25, rh-1.25);
         cairo_stroke(cr);
 
+				/* white corners */
         cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.82);
         const double hs = 3.0;
         const double gcx[4] = { rx, rx+rw-hs, rx, rx+rw-hs };
