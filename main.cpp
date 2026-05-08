@@ -202,18 +202,24 @@ static void render(Output* out) {
         cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
         cairo_set_source_rgba(cr, 0.30, 0.45, 1.0, 1.0);
         cairo_set_line_width(cr, 1.25);
-        cairo_rectangle(cr, rx+0.625, ry+0.625, rw-1.25, rh-1.25);
-        cairo_stroke(cr);
+				double bx = std::floor(rx) + 0.5;
+        double by = std::floor(ry) + 0.5;
+        double bw = std::floor(rw) - 1.0;
+        double bh = std::floor(rh) - 1.0;
+        if (bw > 0 && bh > 0) {
+            cairo_rectangle(cr, bx, by, bw, bh);
+            cairo_stroke(cr);
+        }
 
 				/* white corners */
-        cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.82);
-        const double hs = 3.0;
-        const double gcx[4] = { rx, rx+rw-hs, rx, rx+rw-hs };
-        const double gcy[4] = { ry, ry, ry+rh-hs, ry+rh-hs };
-        for (int i = 0; i < 4; i++) {
-            cairo_rectangle(cr, gcx[i], gcy[i], hs, hs);
-            cairo_fill(cr);
-        }
+        // cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.82);
+        // const double hs = 3.0;
+        // const double gcx[4] = { rx, rx+rw-hs, rx, rx+rw-hs };
+        // const double gcy[4] = { ry, ry, ry+rh-hs, ry+rh-hs };
+        // for (int i = 0; i < 4; i++) {
+        //     cairo_rectangle(cr, gcx[i], gcy[i], hs, hs);
+        //     cairo_fill(cr);
+        // }
 
         if (st->show_dims) {
             char s[64];
