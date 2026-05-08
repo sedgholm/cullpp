@@ -360,12 +360,15 @@ static void set_cursor(Seat* seat, uint32_t serial) {
         wl_cursor_image* img = seat->cur->images[0];
         wl_buffer* cbuf = wl_cursor_image_get_buffer(img);
         if (cbuf) {
+					  int32_t scale = seat->ptr_out ? seat->ptr_out->scale : 1;
+            wl_surface_set_buffer_scale(seat->cur_surf, scale);
             wl_surface_attach(seat->cur_surf, cbuf, 0, 0);
             wl_surface_damage_buffer(seat->cur_surf,0,0,img->width,img->height);
             wl_surface_commit(seat->cur_surf);
+
+						wl_pointer_set_cursor(seat->ptr, serial, seat->cur_surf,
+                img->hotspot_x / scale, img->hotspot_y / scale);
         }
-        wl_pointer_set_cursor(seat->ptr, serial, seat->cur_surf,
-            img->hotspot_x, img->hotspot_y);
     }
 }
 
