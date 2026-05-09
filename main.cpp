@@ -1,4 +1,5 @@
 
+#include <cstdint>
 #include <wayland-client.h>
 #include <wayland-cursor.h>
 #include <cairo/cairo.h>
@@ -18,6 +19,11 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+
+
+constexpr uint32_t BgColor = 0x4A4A4A57; //0x25214257
+constexpr uint32_t BorderColor = 0x4D73FFFF;
+constexpr uint32_t BorderWidth = 1.0;
 
 #ifdef __cplusplus
 extern "C" {
@@ -101,6 +107,14 @@ struct State {
 
 static void render(Output* out);
 
+static inline void set_source_u32(cairo_t *cr, uint32_t c) {
+    cairo_set_source_rgba(cr,
+        ((c >> 24) & 0xFF) / 255.0,
+        ((c >> 16) & 0xFF) / 255.0,
+        ((c >>  8) & 0xFF) / 255.0,
+        ((c >>  0) & 0xFF) / 255.0);
+}
+
 static void frame_done(void* data, wl_callback* cb, uint32_t) {
     Output* out = (Output*)data;
     wl_callback_destroy(cb);
@@ -167,7 +181,7 @@ static void render(Output* out) {
      
     cairo_set_antialias(cr, CAIRO_ANTIALIAS_NONE);
     cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
-    cairo_set_source_rgba(cr, 0.29, 0.29, 0.29, 0.34);
+    set_source_u32(cr, BgColor);
     cairo_paint(cr);
 
     for (const auto& sn : st->snaps) {
@@ -200,16 +214,21 @@ static void render(Output* out) {
         cairo_fill(cr);
 
         cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
-        cairo_set_source_rgba(cr, 0.30, 0.45, 1.0, 1.0);
-        cairo_set_line_width(cr, 1.25);
-				double bx = std::floor(rx) + 0.5;
-        double by = std::floor(ry) + 0.5;
-        double bw = std::floor(rw) - 1.0;
-        double bh = std::floor(rh) - 1.0;
-        if (bw > 0 && bh > 0) {
-            cairo_rectangle(cr, bx, by, bw, bh);
-            cairo_stroke(cr);
-        }
+				set_source_u32(cr, BorderColor);
+
+        cairo_set_line_width(cr, BorderWidth);
+		// cairo_rectangle(cr, rx+0.625, ry+0.625, rw-1.25, rh-1.25);
+		cairo_rectangle(cr, rx, ry, rw, rh);
+    cairo_stroke(cr);
+
+				// double bx = std::floor(rx) + 0.5;
+				//     double by = std::floor(ry) + 0.5;
+				//     double bw = std::floor(rw) - 1.0;
+				//     double bh = std::floor(rh) - 1.0;
+				//     if (bw > 0 && bh > 0) {
+				//         cairo_rectangle(cr, bx, by, bw, bh);
+				//         cairo_stroke(cr);
+				//     }
 
 				/* white corners */
         // cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.82);
