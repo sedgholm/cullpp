@@ -21,9 +21,9 @@
 #include <algorithm>
 
 
-constexpr uint32_t BgColor = 0x4A4A4A57; //0x25214257
-constexpr uint32_t BorderColor = 0x4D73FFFF;
-constexpr uint32_t BorderWidth = 1.0;
+static constexpr uint32_t BgColor = 0x4A4A4A57; //0x25214257
+static constexpr uint32_t BorderColor = 0x4D73FFFF;
+static constexpr uint32_t BorderWidth = 1.0;
 
 #ifdef __cplusplus
 extern "C" {
