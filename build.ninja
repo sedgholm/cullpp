@@ -1,5 +1,5 @@
 builddir = out
-version = 1.0.0-rc.1
+version = 1.0.0-rc.2
 commonflags = -O2 -Wall -Wextra -I$builddir/protocol -Iprotocol $$(pkg-config --cflags wayland-client wayland-cursor xkbcommon cairo)
 cflags = $commonflags
 cppflags = -std=c++17 -DCULLPP_VERSION=\"$version\" $commonflags
