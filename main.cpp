@@ -3,6 +3,7 @@
 #include <wayland-client.h>
 #include <wayland-cursor.h>
 #include <cairo/cairo.h>
+#include <xkbcommon/xkbcommon.h>
 #include "shm_pool.hpp"
 #include <sys/mman.h>
 #include <sys/syscall.h>
@@ -21,9 +22,13 @@
 #include <algorithm>
 
 
-constexpr uint32_t BgColor = 0x4A4A4A57; //0x25214257
-constexpr uint32_t BorderColor = 0x4D73FFFF;
-constexpr uint32_t BorderWidth = 1.0;
+static uint32_t BgColor = 0x4A4A4A57; //0x25214257
+static uint32_t BorderColor = 0x4D73FFFF;
+static double BorderWidth = 1.0;
+
+//override at runtime via CULLPP_RESELECT_MOD env var.
+static constexpr const char* DefaultReselectMod = XKB_MOD_NAME_SHIFT; // ALT, LOGO, CRTL
+static const char* ReselectMod = nullptr;
 
 #ifdef __cplusplus
 extern "C" {
@@ -87,6 +92,12 @@ struct State {
 
     bool   confirmed = false;
     bool   running   = true;
+
+		wl_keyboard*  kbd      = nullptr;
+    xkb_context* xkb_ctx  = nullptr;
+    xkb_keymap*   xkb_map  = nullptr;
+    xkb_state*   xkb_st   = nullptr;
+
     Box    result;
 
     std::string format     = "%x,%y %wx%h";
@@ -106,6 +117,8 @@ struct State {
 };
 
 static void render(Output* out);
+static std::string format_result(const State* st);
+static bool reselect_held(State* st);
 
 static inline void set_source_u32(cairo_t *cr, uint32_t c) {
     cairo_set_source_rgba(cr,
@@ -114,6 +127,23 @@ static inline void set_source_u32(cairo_t *cr, uint32_t c) {
         ((c >>  8) & 0xFF) / 255.0,
         ((c >>  0) & 0xFF) / 255.0);
 }
+
+
+static uint32_t parse_hex_color(const char* s) {
+    if (!s) return 0;
+    size_t len = strlen(s);
+    if (len != 8) { fprintf(stderr, "cullpp: color must be 8 hex digits RRGGBBAA\n"); return 0; }
+    char* end = nullptr;
+    unsigned long v = strtoul(s, &end, 16);
+    if (end != s + 8) { fprintf(stderr, "cullpp: invalid hex color '%s'\n", s); return 0; }
+   
+		// this kinda insigtful BUG dbl shdrs when ./cullpp --border 22222299
+    // return (uint32_t)(((v & 0xFF) << 24) | (((v >> 24) & 0xFF) << 16) |
+    //                   (((v >> 16) & 0xFF) << 8) | ((v >> 8) & 0xFF));
+		return(uint32_t)v;
+		
+}
+
 
 static void frame_done(void* data, wl_callback* cb, uint32_t) {
     Output* out = (Output*)data;
@@ -221,14 +251,6 @@ static void render(Output* out) {
 		cairo_rectangle(cr, rx, ry, rw, rh);
     cairo_stroke(cr);
 
-				// double bx = std::floor(rx) + 0.5;
-				//     double by = std::floor(ry) + 0.5;
-				//     double bw = std::floor(rw) - 1.0;
-				//     double bh = std::floor(rh) - 1.0;
-				//     if (bw > 0 && bh > 0) {
-				//         cairo_rectangle(cr, bx, by, bw, bh);
-				//         cairo_stroke(cr);
-				//     }
 
 				/* white corners */
         // cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.82);
@@ -354,6 +376,8 @@ static void output_create_surface(Output* out) {
         ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
         ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT | ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT);
     zwlr_layer_surface_v1_set_exclusive_zone(out->layer_surf, -1);
+
+		zwlr_layer_surface_v1_set_keyboard_interactivity(out->layer_surf, ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_EXCLUSIVE);
     zwlr_layer_surface_v1_add_listener(out->layer_surf, &ls_listener, out);
     wl_surface_commit(out->surface);
 }
@@ -512,15 +536,44 @@ static void ptr_button(void* d, wl_pointer*, uint32_t, uint32_t,
         st->pressing=false;
         if (st->point_mode) {
             st->result={st->cur_x,st->cur_y,1,1};
-            st->confirmed=true; st->running=false; return;
-        }
-        if (st->has_sel && st->sel.w>1 && st->sel.h>1) {
-            st->result=st->sel; st->confirmed=true; st->running=false;
+        // st->confirmed=true; st->running=false; return;
+        // }
+        // if (st->has_sel && st->sel.w>1 && st->sel.h>1) {
+        //     st->result=st->sel; st->confirmed=true; st->running=false;
+        //     return;
+        // } else {
+        //     for (const auto& sn:st->snaps) if(sn.hovered){
+        //         st->result=sn.rect; st->confirmed=true; st->running=false; return;
+        //     }
+
+
+
+				    st->confirmed=true;
+            if (!reselect_held(st)) { st->running=false; return; }
+            fputs(format_result(st).c_str(), stdout); fflush(stdout);
+            st->confirmed=false; st->has_sel=false; st->sel={0,0,0,0};
+            for (auto* o : st->outputs) request_draw_output(o);
             return;
-        } else {
-            for (const auto& sn:st->snaps) if(sn.hovered){
-                st->result=sn.rect; st->confirmed=true; st->running=false; return;
-            }
+         }
+         if (st->has_sel && st->sel.w>1 && st->sel.h>1) {
+            st->result=st->sel; st->confirmed=true;
+            if (!reselect_held(st)) { st->running=false; return; }
+            fputs(format_result(st).c_str(), stdout); fflush(stdout);
+            st->confirmed=false; st->has_sel=false; st->sel={0,0,0,0};
+            for (auto* o : st->outputs) request_draw_output(o);
+             return;
+         } else {
+            bool has_hovered = false;
+             for (const auto& sn:st->snaps) if(sn.hovered){
+                st->result=sn.rect; st->confirmed=true;
+                if (!reselect_held(st)) { st->running=false; return; }
+                fputs(format_result(st).c_str(), stdout); fflush(stdout);
+                st->confirmed=false; st->has_sel=false; st->sel={0,0,0,0};
+                for (auto* o : st->outputs) request_draw_output(o);
+                has_hovered = true; break;
+             }
+            if (has_hovered) return;
+
             st->has_sel=false;
             st->result={st->cur_x,st->cur_y,1,1};
             st->confirmed=true; st->running=false;
@@ -530,6 +583,7 @@ static void ptr_button(void* d, wl_pointer*, uint32_t, uint32_t,
         }
     }
 }
+
 static void ptr_axis        (void*,wl_pointer*,uint32_t,uint32_t,wl_fixed_t){}
 static void ptr_frame       (void*,wl_pointer*){}
 static void ptr_axis_source (void*,wl_pointer*,uint32_t){}
@@ -543,6 +597,68 @@ static const wl_pointer_listener ptr_listener = {
     .axis_stop=ptr_axis_stop,.axis_discrete=ptr_axis_disc,
     .axis_value120=ptr_axis_v120,.axis_relative_direction=ptr_axis_rel,
 };
+
+
+static void kbd_keymap(void* data, wl_keyboard*, uint32_t format, int32_t fd, uint32_t size) {
+    State* st = (State*)data;
+    if (format != WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1) { close(fd); return; }
+    void* buf = mmap(nullptr, size, PROT_READ, MAP_SHARED, fd, 0);
+    close(fd);
+    if (buf == MAP_FAILED) return;
+    xkb_keymap* map = xkb_keymap_new_from_string(
+        st->xkb_ctx, static_cast<const char*>(buf),
+        XKB_KEYMAP_FORMAT_TEXT_V1, XKB_KEYMAP_COMPILE_NO_FLAGS);
+    munmap(buf, size);
+    if (!map) return;
+    xkb_state* xst = xkb_state_new(map);
+    if (!xst) { xkb_keymap_unref(map); return; }
+    if (st->xkb_st)  xkb_state_unref(st->xkb_st);
+    if (st->xkb_map) xkb_keymap_unref(st->xkb_map);
+    st->xkb_map = map;
+    st->xkb_st  = xst;
+}
+static bool reselect_held(State* st) {
+    return st->xkb_st &&
+        xkb_state_mod_name_is_active(st->xkb_st, ReselectMod,
+            XKB_STATE_MODS_EFFECTIVE) > 0;
+}
+
+static void kbd_key(void* data, wl_keyboard*, uint32_t, uint32_t, uint32_t keycode, uint32_t key_state) {
+    State* st = (State*)data;
+    if (key_state != WL_KEYBOARD_KEY_STATE_PRESSED) return;
+    if (!st->xkb_st) return;
+    xkb_keycode_t xkb_kc = keycode + 8;
+    const xkb_keysym_t* syms;
+    int nsyms = xkb_state_key_get_syms(st->xkb_st, xkb_kc, &syms);
+    for (int i = 0; i < nsyms; ++i) {
+        if (syms[i] == XKB_KEY_Escape) {
+            st->running = false;
+        }
+        if (syms[i] == XKB_KEY_c || syms[i] == XKB_KEY_C) {
+            if (xkb_state_mod_name_is_active(st->xkb_st, XKB_MOD_NAME_CTRL,
+                    XKB_STATE_MODS_EFFECTIVE)) {
+                st->running = false;
+            }
+        }
+    }
+}
+static void kbd_modifiers(void* data, wl_keyboard*, uint32_t, uint32_t mods_depressed, uint32_t mods_latched, uint32_t mods_locked, uint32_t group) {
+    State* st = (State*)data;
+    if (st->xkb_st)
+        xkb_state_update_mask(st->xkb_st, mods_depressed, mods_latched, mods_locked, 0, 0, group);
+}
+static void kbd_enter     (void*, wl_keyboard*, uint32_t, wl_surface*, wl_array*) {}
+static void kbd_leave     (void*, wl_keyboard*, uint32_t, wl_surface*) {}
+static void kbd_repeat_info(void*, wl_keyboard*, int32_t, int32_t) {}
+static const wl_keyboard_listener kbd_listener = {
+    .keymap = kbd_keymap,
+    .enter = kbd_enter,
+    .leave = kbd_leave,
+    .key = kbd_key,
+    .modifiers = kbd_modifiers,
+    .repeat_info = kbd_repeat_info,
+};
+
 
 static void seat_caps(void* d, wl_seat* ws, uint32_t caps) {
     Seat* seat=(Seat*)d; State* st=seat->st;
@@ -568,6 +684,13 @@ static void seat_caps(void* d, wl_seat* ws, uint32_t caps) {
             }
             if (seat->cur) seat->cur_surf=wl_compositor_create_surface(st->compositor);
         }
+    }
+
+		    if ((caps & WL_SEAT_CAPABILITY_KEYBOARD) && !st->kbd) {
+        if (!st->xkb_ctx)
+            st->xkb_ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+        st->kbd = wl_seat_get_keyboard(ws);
+        wl_keyboard_add_listener(st->kbd, &kbd_listener, st);
     }
 }
 static void seat_name(void*,wl_seat*,const char*){}
@@ -683,6 +806,11 @@ static std::string format_result(const State* st) {
 }
 
 int main(int argc, char* argv[]) {
+
+	  //env
+    const char* env_mod = getenv("CULLPP_RESELECT_MOD");
+    ReselectMod = env_mod ? env_mod : DefaultReselectMod;
+
     struct sigaction sa{};
     sa.sa_handler=on_signal; sigemptyset(&sa.sa_mask);
     sigaction(SIGINT,&sa,nullptr); sigaction(SIGTERM,&sa,nullptr);
@@ -700,6 +828,10 @@ int main(int argc, char* argv[]) {
         else if (!strcmp(argv[i],"-o")) st.output_mode=true;
         else if (!strcmp(argv[i],"-r")) st.force_stdin=true;
         else if (!strcmp(argv[i],"-v")) st.verbose=true;
+
+				else if (!strcmp(argv[i],"--bg") && i+1<argc) BgColor = parse_hex_color(argv[++i]);
+        else if (!strcmp(argv[i],"--border") && i+1<argc) BorderColor = parse_hex_color(argv[++i]);
+        else if (!strcmp(argv[i],"--border-width") && i+1<argc) { char* e=nullptr; double v=strtod(argv[++i],&e); if(e!=argv[i]&&v>0) BorderWidth=v; }
         else if (!strcmp(argv[i],"-h")||!strcmp(argv[i],"--help")) {
             fprintf(stderr,
                 "Usage: cullpp " CULLPP_VERSION " [options...]\n"
@@ -710,7 +842,16 @@ int main(int argc, char* argv[]) {
                 "  -p         point mode\n"
                 "  -o         outputs as snap rects\n"
                 "  -r         read stdin even if tty\n"
-                "  -v         verbose debug output\n");
+                "  -v         verbose debug output\n"
+								"  --bg RRGGBBAA      background color\n"
+                "  --border RRGGBBAA  border color\n"
+                "  --border-width N   border width in pixels\n"
+								"env:\n"
+								"    CULLPP_RESELECT_MOD  reselect modifier def: " XKB_MOD_NAME_SHIFT "\n"
+
+								);
+
+
             return 0;
         }
         else { fprintf(stderr,"cullpp: unknown option '%s'\n",argv[i]); return 1; }
@@ -827,6 +968,11 @@ done:
     }
 
     if (st.confirmed || g_quit) wl_display_roundtrip(st.display);
+
+		if (st.kbd)     wl_keyboard_destroy(st.kbd);
+    if (st.xkb_st)  xkb_state_unref(st.xkb_st);
+    if (st.xkb_map) xkb_keymap_unref(st.xkb_map);
+    if (st.xkb_ctx) xkb_context_unref(st.xkb_ctx);
     if (st.cursor_mgr) wp_cursor_shape_manager_v1_destroy(st.cursor_mgr);
     if (st.xdg_mgr)    zxdg_output_manager_v1_destroy(st.xdg_mgr);
     if (st.shell)      zwlr_layer_shell_v1_destroy(st.shell);
