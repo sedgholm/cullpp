@@ -42,7 +42,7 @@ build $builddir/main.o: cxx main.cpp || $
   $builddir/protocol/wlr-layer-shell-unstable-v1-client-protocol.h $
   $builddir/protocol/xdg-output-unstable-v1-client-protocol.h $
   $builddir/protocol/cursor-shape-v1-client-protocol.h
-build $builddir/shm_pool.o: cxx shm_pool.cpp
+build $builddir/shm-pool.o: cxx shm-pool.cpp
 
 build $builddir/wlr-layer-shell-unstable-v1-protocol.o: cc $builddir/protocol/wlr-layer-shell-unstable-v1-protocol.c
 build $builddir/xdg-output-unstable-v1-protocol.o: cc $builddir/protocol/xdg-output-unstable-v1-protocol.c
@@ -52,7 +52,7 @@ build $builddir/tablet-unstable-v2-protocol.o: cc $builddir/protocol/tablet-unst
 
 build cullpp: link $
   $builddir/main.o $
-  $builddir/shm_pool.o $
+  $builddir/shm-pool.o $
   $builddir/wlr-layer-shell-unstable-v1-protocol.o $
   $builddir/xdg-output-unstable-v1-protocol.o $
   $builddir/cursor-shape-v1-protocol.o $
