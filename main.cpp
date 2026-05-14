@@ -114,7 +114,7 @@ struct State {
 
 };
 
-static void render(Output* out);
+static bool render(Output* out);
 static std::string format_result(const State* st);
 static bool reselect_held(State* st);
 
@@ -143,11 +143,16 @@ static uint32_t parse_hex_color(const char* s) {
 }
 
 
+static bool flush_display(State* st) {
+    return wl_display_flush(st->display) >= 0 || errno == EAGAIN;
+}
+
 static void frame_done(void* data, wl_callback* cb, uint32_t) {
     Output* out = (Output*)data;
     wl_callback_destroy(cb);
     out->frame_cb = nullptr;
-    if (out->needs_draw) render(out);
+    if (out->needs_draw && render(out) && !flush_display(out->st))
+        out->st->running = false;
 }
 static const wl_callback_listener frame_listener = { .done = frame_done };
 
@@ -192,19 +197,19 @@ static void unmap_outputs(State* st) {
     wl_display_flush(st->display);
 }
 
-static void render(Output* out) {
+static bool render(Output* out) {
     State* st = out->st;
-    if (!out->configured) return;
+    if (!out->configured) return false;
 
     out->needs_draw = false;
     if (st->verbose) fprintf(stderr, "RENDER: output %p geo=(%d,%d %dx%d) sel=%d pressing=%d\n",
         (void*)out, out->lx, out->ly, out->lw, out->lh, st->has_sel, st->pressing);
 
     PoolBuf* pb = pool_next_buf(out->pool);
-    if (!pb) { out->needs_draw = true; return; }  // both buffers in-flight
+    if (!pb) { out->needs_draw = true; return false; }  // both buffers in-flight
 
     cairo_t* cr = pb->cr;
-    if (!cr) { out->needs_draw = true; return; }
+    if (!cr) { out->needs_draw = true; return false; }
 
     // apply HiDPI scale so all drawing coords are logical pixels.
     cairo_reset_clip(cr);
@@ -348,6 +353,16 @@ static void render(Output* out) {
     wl_surface_commit(out->surface);
     // pool_next_buf already marked buffer busy atomically
     out->pool.idx ^= 1;
+    return true;
+}
+
+static bool render_pending_outputs(State* st) {
+    bool rendered_any = false;
+    for (auto* out : st->outputs) {
+        if (out->needs_draw && !out->frame_cb && out->configured)
+            rendered_any |= render(out);
+    }
+    return !rendered_any || flush_display(st);
 }
 
 static void ls_configure(void* data, zwlr_layer_surface_v1* ls,
@@ -876,9 +891,7 @@ int main(int argc, char* argv[]) {
 
 
 
-        for (auto* out:st.outputs)
-            if (out->needs_draw && !out->frame_cb && out->configured)
-                render(out);
+        if (!render_pending_outputs(&st)) break;
         if (!st.running || g_quit) break;
 
         while (wl_display_prepare_read(st.display) != 0) {
@@ -906,10 +919,7 @@ int main(int argc, char* argv[]) {
 
             if (wl_display_dispatch_pending(st.display) < 0) break;
             if (!st.running || g_quit) break;
-            for (auto* out : st.outputs)
-                if (out->needs_draw && !out->frame_cb && out->configured)
-                    render(out);
-            if (wl_display_flush(st.display) < 0 && errno != EAGAIN) break;
+            if (!render_pending_outputs(&st)) break;
         } else {
             wl_display_cancel_read(st.display);
         }
