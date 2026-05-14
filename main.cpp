@@ -111,9 +111,7 @@ struct State {
     cairo_font_face_t* ui_font   = nullptr;
     cairo_font_face_t* mono_font = nullptr;
 
-    bool   idle      = true;
-    bool   dirty_sel = false;
-    bool   dirty_cursor = false;
+
 };
 
 static void render(Output* out);
@@ -136,12 +134,12 @@ static uint32_t parse_hex_color(const char* s) {
     char* end = nullptr;
     unsigned long v = strtoul(s, &end, 16);
     if (end != s + 8) { fprintf(stderr, "cullpp: invalid hex color '%s'\n", s); return 0; }
-   
+
 		// this kinda insigtful BUG dbl shdrs when ./cullpp --border 22222299
     // return (uint32_t)(((v & 0xFF) << 24) | (((v >> 24) & 0xFF) << 16) |
     //                   (((v >> 16) & 0xFF) << 8) | ((v >> 8) & 0xFF));
 		return(uint32_t)v;
-		
+
 }
 
 
@@ -204,11 +202,11 @@ static void render(Output* out) {
 
     cairo_t* cr = cairo_create(pb->cs);
 
-    // apply HiDPI scale so all drawing coords are logical pixels. 
+    // apply HiDPI scale so all drawing coords are logical pixels.
     cairo_identity_matrix(cr);
     cairo_scale(cr, (double)out->scale, (double)out->scale);
 
-     
+
     cairo_set_antialias(cr, CAIRO_ANTIALIAS_NONE);
     cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
     set_source_u32(cr, BgColor);
@@ -339,7 +337,7 @@ static void render(Output* out) {
     }
 
     wl_surface_attach(out->surface, pb->wl, 0, 0);
-   
+
     wl_surface_damage(out->surface, 0, 0, out->lw, out->lh);
     wl_surface_set_buffer_scale(out->surface, out->scale);
     wl_surface_commit(out->surface);
@@ -430,17 +428,11 @@ static void ptr_enter(void* d, wl_pointer*, uint32_t ser,
             const double gx = out->lx + wl_fixed_to_double(sx);
             const double gy = out->ly + wl_fixed_to_double(sy);
             st->cur_x = gx; st->cur_y = gy;
-            bool changed = false;
             for (auto& sn:st->snaps) {
                 const bool h = inbox(sn.rect,gx,gy);
-                if (h != sn.hovered) {
-                    changed = true;
+                if (h != sn.hovered)
                     request_draw_box(st, sn.rect, 4.0);
-                }
                 sn.hovered = h;
-            }
-            if (changed) {
-                st->dirty_cursor = true;
             }
             break;
         }
@@ -452,16 +444,12 @@ static void ptr_leave(void* d, wl_pointer*, uint32_t, wl_surface*) {
     State* st=seat->st;
     seat->ptr_out = nullptr;
 
-
-    bool changed = false;
     for (auto& sn:st->snaps) {
         if (sn.hovered) {
             sn.hovered=false;
-            changed=true;
             request_draw_box(st, sn.rect, 4.0);
         }
     }
-    if (changed) st->dirty_cursor = true;
 }
 static void ptr_motion(void* d, wl_pointer*, uint32_t,
                         wl_fixed_t sx, wl_fixed_t sy) {
@@ -492,9 +480,7 @@ static void ptr_motion(void* d, wl_pointer*, uint32_t,
         sn.hovered = hovered;
     }
     const bool cursor_changed = gx != prev_x || gy != prev_y;
-    st->idle = false;
     if (selection_changed) {
-        st->dirty_sel = true;
         if (prev_has_sel) request_draw_box(st, prev_sel, 4.0);
         if (st->has_sel) request_draw_box(st, st->sel, 4.0);
         request_draw_output(seat->ptr_out);
@@ -505,7 +491,6 @@ static void ptr_motion(void* d, wl_pointer*, uint32_t,
         if (st->verbose) fprintf(stderr, "MOTION: sel=(%d,%d %dx%d)\n",
             (int)st->sel.x, (int)st->sel.y, (int)st->sel.w, (int)st->sel.h);
     } else if (hover_changed || (st->crosshair && cursor_changed)) {
-        st->dirty_cursor = true;
         request_draw_output(seat->ptr_out);
         if (st->crosshair) {
             for (auto* out : st->outputs)
@@ -526,8 +511,6 @@ static void ptr_button(void* d, wl_pointer*, uint32_t, uint32_t,
     if (state_val==WL_POINTER_BUTTON_STATE_PRESSED) {
         st->anchor_x=st->cur_x; st->anchor_y=st->cur_y;
         st->pressing=true; st->has_sel=false;
-        st->dirty_sel = true;
-        st->idle = false;
         request_draw_output(seat->ptr_out);
         if (st->verbose) fprintf(stderr, "BUTTON: LMB DOWN at (%d,%d)\n",
             (int)st->cur_x, (int)st->cur_y);
@@ -896,15 +879,12 @@ int main(int argc, char* argv[]) {
         if (wl_display_dispatch_pending(st.display) < 0) break;
         if (!st.running || g_quit) break;
 
-    
-        
+
+
         for (auto* out:st.outputs)
             if (out->needs_draw && !out->frame_cb && out->configured)
                 render(out);
         if (!st.running || g_quit) break;
-
-        st.dirty_sel = false;
-        st.dirty_cursor = false;
 
         while (wl_display_prepare_read(st.display) != 0) {
             if (wl_display_dispatch_pending(st.display) < 0) goto done;
@@ -927,8 +907,8 @@ int main(int argc, char* argv[]) {
         }
         if (pfd.revents & POLLIN) {
             if (wl_display_read_events(st.display) < 0) break;
-       
-        
+
+
             if (wl_display_dispatch_pending(st.display) < 0) break;
             if (!st.running || g_quit) break;
             for (auto* out : st.outputs)
