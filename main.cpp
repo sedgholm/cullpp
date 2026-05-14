@@ -4,7 +4,7 @@
 #include <wayland-cursor.h>
 #include <cairo/cairo.h>
 #include <xkbcommon/xkbcommon.h>
-#include "shm_pool.hpp"
+#include "shm-pool.hpp"
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <linux/memfd.h>
@@ -135,7 +135,7 @@ static uint32_t parse_hex_color(const char* s) {
     unsigned long v = strtoul(s, &end, 16);
     if (end != s + 8) { fprintf(stderr, "cullpp: invalid hex color '%s'\n", s); return 0; }
 
-		// this kinda insigtful BUG dbl shdrs when ./cullpp --border 22222299
+		// this creats dbl shdrs when ./cullpp --border 22222299
     // return (uint32_t)(((v & 0xFF) << 24) | (((v >> 24) & 0xFF) << 16) |
     //                   (((v >> 16) & 0xFF) << 8) | ((v >> 8) & 0xFF));
 		return(uint32_t)v;
@@ -171,9 +171,12 @@ static void request_draw_output(Output* out) {
 }
 
 static void request_draw_box(State* st, const Box& box, double pad = 0.0) {
-    (void)pad;
     for (auto* out : st->outputs)
-        if (box_intersects_output(box, out, 0.0)) out->needs_draw = true;
+        if (box_intersects_output(box, out, pad)) out->needs_draw = true;
+}
+
+static double selection_damage_pad() {
+    return BorderWidth > 0.0 ? BorderWidth * 0.5 : 0.0;
 }
 
 static void unmap_outputs(State* st) {
@@ -200,9 +203,12 @@ static void render(Output* out) {
     PoolBuf* pb = pool_next_buf(out->pool);
     if (!pb) { out->needs_draw = true; return; }  // both buffers in-flight
 
-    cairo_t* cr = cairo_create(pb->cs);
+    cairo_t* cr = pb->cr;
+    if (!cr) { out->needs_draw = true; return; }
 
     // apply HiDPI scale so all drawing coords are logical pixels.
+    cairo_reset_clip(cr);
+    cairo_new_path(cr);
     cairo_identity_matrix(cr);
     cairo_scale(cr, (double)out->scale, (double)out->scale);
 
@@ -327,7 +333,6 @@ static void render(Output* out) {
         }
     }
 
-    cairo_destroy(cr);
     cairo_surface_flush(pb->cs);
 
     // Only register a new frame callback if one isn't already in-flight.
@@ -431,7 +436,7 @@ static void ptr_enter(void* d, wl_pointer*, uint32_t ser,
             for (auto& sn:st->snaps) {
                 const bool h = inbox(sn.rect,gx,gy);
                 if (h != sn.hovered)
-                    request_draw_box(st, sn.rect, 4.0);
+                    request_draw_box(st, sn.rect);
                 sn.hovered = h;
             }
             break;
@@ -447,7 +452,7 @@ static void ptr_leave(void* d, wl_pointer*, uint32_t, wl_surface*) {
     for (auto& sn:st->snaps) {
         if (sn.hovered) {
             sn.hovered=false;
-            request_draw_box(st, sn.rect, 4.0);
+            request_draw_box(st, sn.rect);
         }
     }
 }
@@ -481,8 +486,9 @@ static void ptr_motion(void* d, wl_pointer*, uint32_t,
     }
     const bool cursor_changed = gx != prev_x || gy != prev_y;
     if (selection_changed) {
-        if (prev_has_sel) request_draw_box(st, prev_sel, 4.0);
-        if (st->has_sel) request_draw_box(st, st->sel, 4.0);
+        const double pad = selection_damage_pad();
+        if (prev_has_sel) request_draw_box(st, prev_sel, pad);
+        if (st->has_sel) request_draw_box(st, st->sel, pad);
         request_draw_output(seat->ptr_out);
         if (st->crosshair) {
             for (auto* out : st->outputs)
@@ -500,6 +506,17 @@ static void ptr_motion(void* d, wl_pointer*, uint32_t,
             (int)st->cur_x, (int)st->cur_y, hover_changed);
     }
 }
+static bool emit_and_loop(State* st) {
+    st->confirmed = true;
+    if (!reselect_held(st)) { st->running = false; return false; }
+    fputs(format_result(st).c_str(), stdout); fflush(stdout);
+    st->confirmed = false;
+    st->has_sel = false;
+    st->sel = {0, 0, 0, 0};
+    for (auto* o : st->outputs) request_draw_output(o);
+    return true;
+}
+
 static void ptr_button(void* d, wl_pointer*, uint32_t, uint32_t,
                         uint32_t btn, uint32_t state_val) {
     Seat*  seat=(Seat*)d;
@@ -519,40 +536,18 @@ static void ptr_button(void* d, wl_pointer*, uint32_t, uint32_t,
         st->pressing=false;
         if (st->point_mode) {
             st->result={st->cur_x,st->cur_y,1,1};
-        // st->confirmed=true; st->running=false; return;
-        // }
-        // if (st->has_sel && st->sel.w>1 && st->sel.h>1) {
-        //     st->result=st->sel; st->confirmed=true; st->running=false;
-        //     return;
-        // } else {
-        //     for (const auto& sn:st->snaps) if(sn.hovered){
-        //         st->result=sn.rect; st->confirmed=true; st->running=false; return;
-        //     }
-
-
-
-				    st->confirmed=true;
-            if (!reselect_held(st)) { st->running=false; return; }
-            fputs(format_result(st).c_str(), stdout); fflush(stdout);
-            st->confirmed=false; st->has_sel=false; st->sel={0,0,0,0};
-            for (auto* o : st->outputs) request_draw_output(o);
+            if (!emit_and_loop(st)) return;
             return;
          }
          if (st->has_sel && st->sel.w>1 && st->sel.h>1) {
-            st->result=st->sel; st->confirmed=true;
-            if (!reselect_held(st)) { st->running=false; return; }
-            fputs(format_result(st).c_str(), stdout); fflush(stdout);
-            st->confirmed=false; st->has_sel=false; st->sel={0,0,0,0};
-            for (auto* o : st->outputs) request_draw_output(o);
-             return;
+            st->result = st->sel;
+            if (!emit_and_loop(st)) return;
+            return;
          } else {
             bool has_hovered = false;
              for (const auto& sn:st->snaps) if(sn.hovered){
-                st->result=sn.rect; st->confirmed=true;
-                if (!reselect_held(st)) { st->running=false; return; }
-                fputs(format_result(st).c_str(), stdout); fflush(stdout);
-                st->confirmed=false; st->has_sel=false; st->sel={0,0,0,0};
-                for (auto* o : st->outputs) request_draw_output(o);
+                st->result = sn.rect;
+                if (!emit_and_loop(st)) return;
                 has_hovered = true; break;
              }
             if (has_hovered) return;
@@ -560,7 +555,7 @@ static void ptr_button(void* d, wl_pointer*, uint32_t, uint32_t,
             st->has_sel=false;
             st->result={st->cur_x,st->cur_y,1,1};
             st->confirmed=true; st->running=false;
-            request_draw_box(st, cleared_sel, 4.0);
+            request_draw_box(st, cleared_sel, selection_damage_pad());
             request_draw_output(seat->ptr_out);
             return;
         }
