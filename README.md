@@ -44,18 +44,15 @@ cullpp -v
 ```
 
 ```sh
-# screenshot
 grim -g "$(cullpp)" ~/screenshot.png
 
-# region recording
 wf-recorder -g "$(cullpp)" -f output.mp4
 
-# window placement (sway)
 swaymsg "resize set $(cullpp -f '%w %h'); move position $(cullpp -f '%x %y')"
 
-# screenshot straight into clipboard history tools
 grim -g "$(cullpp)" - | wl-copy
-
+```
+```sh
 # OCR a selected region
 grim -g "$(cullpp)" -t ppm - | tesseract stdin stdout
 

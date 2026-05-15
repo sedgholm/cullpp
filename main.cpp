@@ -839,6 +839,7 @@ int main(int argc, char* argv[]) {
 								"  --bg RRGGBBAA      background color\n"
                 "  --border RRGGBBAA  border color\n"
                 "  --border-width N   border width in pixels\n"
+								"\n"
 								"env:\n"
 								"    CULLPP_RESELECT_MOD  reselect modifier def: " XKB_MOD_NAME_SHIFT "\n"
 
