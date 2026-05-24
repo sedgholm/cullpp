@@ -13,9 +13,9 @@ static constexpr size_t MAX_POOL_SIZE = 256 * 1024 * 1024; // 256 MB limit
 
 static int make_shm_fd(size_t sz) {
     if (sz > MAX_POOL_SIZE) return -1;
-    int fd = (int)syscall(SYS_memfd_create, "cullpp-pool", MFD_CLOEXEC);
+    int fd = static_cast<int>(syscall(SYS_memfd_create, "cullpp-pool", MFD_CLOEXEC));
     if (fd < 0) return -1;
-    if (ftruncate(fd, (off_t)sz) < 0) { close(fd); return -1; }
+    if (ftruncate(fd, static_cast<off_t>(sz)) < 0) { close(fd); return -1; }
     return fd;
 }
 
@@ -34,7 +34,7 @@ bool pool_init(Pool& p, wl_shm* shm, int w, int h, int scale) {
     const int ph = h * scale;
     const int stride = cairo_format_stride_for_width(CAIRO_FORMAT_ARGB32, pw);
     if (stride <= 0) return false;
-    const size_t half = (size_t)stride * ph;
+    const size_t half = static_cast<size_t>(stride) * ph;
     if (half > SIZE_MAX / 2) return false;
     const size_t need = half * 2;
 
@@ -54,7 +54,7 @@ bool pool_init(Pool& p, wl_shm* shm, int w, int h, int scale) {
         }
         p.size = need;
         p.shm  = shm;
-        p.wl_pool = wl_shm_create_pool(shm, p.fd, (int32_t)need);
+        p.wl_pool = wl_shm_create_pool(shm, p.fd, static_cast<int32_t>(need));
         if (!p.wl_pool) {
             munmap(p.data, p.size);
             close(p.fd);
@@ -65,20 +65,20 @@ bool pool_init(Pool& p, wl_shm* shm, int w, int h, int scale) {
         }
     } else if (need > p.size) {
        
-        if (ftruncate(p.fd, (off_t)need) < 0) return false;
+        if (ftruncate(p.fd, static_cast<off_t>(need)) < 0) return false;
         void* old_data = p.data;
         size_t old_size = p.size;
         void* nd = mremap(p.data, p.size, need, MREMAP_MAYMOVE);
         if (nd == MAP_FAILED) {
 
-            ftruncate(p.fd, (off_t)old_size);
+            ftruncate(p.fd, static_cast<off_t>(old_size));
             return false;
         }
         p.data = nd;
         p.size = need;
 
         if (madvise(old_data, old_size, MADV_DONTNEED) < 0) { /* ignore */ }
-        wl_shm_pool_resize(p.wl_pool, (int32_t)need);
+        wl_shm_pool_resize(p.wl_pool, static_cast<int32_t>(need));
     }
 
 
@@ -89,7 +89,7 @@ bool pool_init(Pool& p, wl_shm* shm, int w, int h, int scale) {
 
 
     for (int i = 0; i < 2; i++) {
-        const int32_t offset = (int32_t)(i * half);
+        const int32_t offset = static_cast<int32_t>(i * half);
         p.bufs[i].wl = wl_shm_pool_create_buffer(
             p.wl_pool, offset, pw, ph, stride, WL_SHM_FORMAT_ARGB8888);
         if (!p.bufs[i].wl) {
@@ -101,7 +101,7 @@ bool pool_init(Pool& p, wl_shm* shm, int w, int h, int scale) {
 
  
         p.bufs[i].cs = cairo_image_surface_create_for_data(
-            (unsigned char*)p.data + offset,
+            static_cast<unsigned char*>(p.data) + offset,
             CAIRO_FORMAT_ARGB32, pw, ph, stride);
         if (!p.bufs[i].cs ||
             cairo_surface_status(p.bufs[i].cs) != CAIRO_STATUS_SUCCESS) {

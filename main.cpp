@@ -20,6 +20,8 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <array>
+#include <iostream>
 
 
 static uint32_t BgColor = 0x4A4A4A57; //0x25214257
@@ -138,7 +140,7 @@ static uint32_t parse_hex_color(const char* s) {
 		// this creats dbl shdrs when ./cullpp --border 22222299
     // return (uint32_t)(((v & 0xFF) << 24) | (((v >> 24) & 0xFF) << 16) |
     //                   (((v >> 16) & 0xFF) << 8) | ((v >> 8) & 0xFF));
-		return(uint32_t)v;
+	return static_cast<uint32_t>(v);
 
 }
 
@@ -148,7 +150,7 @@ static bool flush_display(State* st) {
 }
 
 static void frame_done(void* data, wl_callback* cb, uint32_t) {
-    Output* out = (Output*)data;
+    auto* out = static_cast<Output*>(data);
     wl_callback_destroy(cb);
     out->frame_cb = nullptr;
     if (out->needs_draw && render(out) && !flush_display(out->st))
@@ -203,7 +205,7 @@ static bool render(Output* out) {
 
     out->needs_draw = false;
     if (st->verbose) fprintf(stderr, "RENDER: output %p geo=(%d,%d %dx%d) sel=%d pressing=%d\n",
-        (void*)out, out->lx, out->ly, out->lw, out->lh, st->has_sel, st->pressing);
+        static_cast<void*>(out), out->lx, out->ly, out->lw, out->lh, st->has_sel, st->pressing);
 
     PoolBuf* pb = pool_next_buf(out->pool);
     if (!pb) { out->needs_draw = true; return false; }  // both buffers in-flight
@@ -215,7 +217,7 @@ static bool render(Output* out) {
     cairo_reset_clip(cr);
     cairo_new_path(cr);
     cairo_identity_matrix(cr);
-    cairo_scale(cr, (double)out->scale, (double)out->scale);
+    cairo_scale(cr, static_cast<double>(out->scale), static_cast<double>(out->scale));
 
 
     cairo_set_antialias(cr, CAIRO_ANTIALIAS_NONE);
@@ -272,12 +274,12 @@ static bool render(Output* out) {
         // }
 
         if (st->show_dims) {
-            char s[64];
-            snprintf(s, sizeof(s), "%d × %d", (int)st->sel.w, (int)st->sel.h);
+            std::array<char, 64> s{};
+            snprintf(s.data(), s.size(), "%d × %d", static_cast<int>(st->sel.w), static_cast<int>(st->sel.h));
             cairo_set_font_face(cr, st->ui_font);
             cairo_set_font_size(cr, 13.0);
             cairo_text_extents_t te;
-            cairo_text_extents(cr, s, &te);
+            cairo_text_extents(cr, s.data(), &te);
             double tx = rx + rw + 10;
             double ty = ry + rh + 10 + te.height;
             if (tx + te.width + 8 > out->lw) tx = rx - te.width - 14;
@@ -290,7 +292,7 @@ static bool render(Output* out) {
             cairo_fill(cr);
             cairo_set_source_rgba(cr, 1, 1, 1, 1);
             cairo_move_to(cr, tx, ty);
-            cairo_show_text(cr, s);
+            cairo_show_text(cr, s.data());
         }
     }
 
@@ -305,22 +307,22 @@ static bool render(Output* out) {
             cairo_move_to(cr, cx+0.5, 0.5);   cairo_line_to(cr, cx+0.5, out->lh);
             cairo_stroke(cr);
 
-            char s[128];
+            std::array<char, 128> s{};
             if (st->pressing && st->has_sel) {
-                snprintf(s, sizeof(s), "%dx%d",
-                    (int)st->sel.w, (int)st->sel.h);
+                snprintf(s.data(), s.size(), "%dx%d",
+                    static_cast<int>(st->sel.w), static_cast<int>(st->sel.h));
             } else if (st->pressing) {
-                int dx = (int)std::abs(st->cur_x - st->anchor_x);
-                int dy = (int)std::abs(st->cur_y - st->anchor_y);
-                snprintf(s, sizeof(s), "%d, %d  +%dx%d",
-                    (int)st->cur_x, (int)st->cur_y, dx, dy);
+                int dx = static_cast<int>(std::abs(st->cur_x - st->anchor_x));
+                int dy = static_cast<int>(std::abs(st->cur_y - st->anchor_y));
+                snprintf(s.data(), s.size(), "%d, %d  +%dx%d",
+                    static_cast<int>(st->cur_x), static_cast<int>(st->cur_y), dx, dy);
             } else {
-                snprintf(s, sizeof(s), "%d, %d", (int)st->cur_x, (int)st->cur_y);
+                snprintf(s.data(), s.size(), "%d, %d", static_cast<int>(st->cur_x), static_cast<int>(st->cur_y));
             }
             cairo_set_font_face(cr, st->mono_font);
             cairo_set_font_size(cr, 11.0);
             cairo_text_extents_t te;
-            cairo_text_extents(cr, s, &te);
+            cairo_text_extents(cr, s.data(), &te);
             double tx = cx + 12;
             double ty = cy - 8;
             if (tx + te.width + 6 > out->lw) tx = cx - te.width - 12;
@@ -334,7 +336,7 @@ static bool render(Output* out) {
             cairo_fill(cr);
             cairo_set_source_rgba(cr, 0.0, 1.0, 0.0, 0.95);
             cairo_move_to(cr, tx, ty);
-            cairo_show_text(cr, s);
+            cairo_show_text(cr, s.data());
         }
     }
 
@@ -367,9 +369,9 @@ static bool render_pending_outputs(State* st) {
 
 static void ls_configure(void* data, zwlr_layer_surface_v1* ls,
                           uint32_t serial, uint32_t w, uint32_t h) {
-    Output* out = (Output*)data;
+    auto* out = static_cast<Output*>(data);
     zwlr_layer_surface_v1_ack_configure(ls, serial);
-    if (!pool_init(out->pool, out->st->shm, (int)w, (int)h, out->scale)) {
+    if (!pool_init(out->pool, out->st->shm, static_cast<int>(w), static_cast<int>(h), out->scale)) {
         fprintf(stderr, "cullpp: pool_init failed (%ux%u scale=%d)\n", w, h, out->scale);
         out->st->running = false;
         return;
@@ -378,7 +380,7 @@ static void ls_configure(void* data, zwlr_layer_surface_v1* ls,
     out->needs_draw  = true;
 }
 static void ls_closed(void* data, zwlr_layer_surface_v1*) {
-    ((Output*)data)->st->running = false;
+    static_cast<Output*>(data)->st->running = false;
 }
 static const zwlr_layer_surface_v1_listener ls_listener = {
     .configure=ls_configure, .closed=ls_closed };
@@ -435,7 +437,7 @@ static void set_cursor(Seat* seat, uint32_t serial) {
 
 static void ptr_enter(void* d, wl_pointer*, uint32_t ser,
                        wl_surface* surf, wl_fixed_t sx, wl_fixed_t sy) {
-    Seat* s=(Seat*)d;
+    auto* s = static_cast<Seat*>(d);
     State* st=s->st;
     s->ptr_ser=ser; s->ptr_out=nullptr;
     for (auto* out:st->outputs) {
@@ -460,7 +462,7 @@ static void ptr_enter(void* d, wl_pointer*, uint32_t ser,
     set_cursor(s, ser);
 }
 static void ptr_leave(void* d, wl_pointer*, uint32_t, wl_surface*) {
-    Seat* seat=(Seat*)d;
+    auto* seat = static_cast<Seat*>(d);
     State* st=seat->st;
     seat->ptr_out = nullptr;
 
@@ -473,7 +475,7 @@ static void ptr_leave(void* d, wl_pointer*, uint32_t, wl_surface*) {
 }
 static void ptr_motion(void* d, wl_pointer*, uint32_t,
                         wl_fixed_t sx, wl_fixed_t sy) {
-    Seat*  seat=(Seat*)d;
+    auto* seat = static_cast<Seat*>(d);
     State* st=seat->st;
     if (!seat->ptr_out) return;
     const double prev_x = st->cur_x;
@@ -510,7 +512,7 @@ static void ptr_motion(void* d, wl_pointer*, uint32_t,
                 if (point_in_output(out, prev_x, prev_y)) request_draw_output(out);
         }
         if (st->verbose) fprintf(stderr, "MOTION: sel=(%d,%d %dx%d)\n",
-            (int)st->sel.x, (int)st->sel.y, (int)st->sel.w, (int)st->sel.h);
+            static_cast<int>(st->sel.x), static_cast<int>(st->sel.y), static_cast<int>(st->sel.w), static_cast<int>(st->sel.h));
     } else if (hover_changed || (st->crosshair && cursor_changed)) {
         request_draw_output(seat->ptr_out);
         if (st->crosshair) {
@@ -518,13 +520,13 @@ static void ptr_motion(void* d, wl_pointer*, uint32_t,
                 if (point_in_output(out, prev_x, prev_y)) request_draw_output(out);
         }
         if (st->verbose) fprintf(stderr, "MOTION: cursor=(%d,%d) hover_changed=%d\n",
-            (int)st->cur_x, (int)st->cur_y, hover_changed);
+            static_cast<int>(st->cur_x), static_cast<int>(st->cur_y), hover_changed);
     }
 }
 static bool emit_and_loop(State* st) {
     st->confirmed = true;
     if (!reselect_held(st)) { st->running = false; return false; }
-    fputs(format_result(st).c_str(), stdout); fflush(stdout);
+    std::cout << format_result(st) << std::flush;
     st->confirmed = false;
     st->has_sel = false;
     st->sel = {0, 0, 0, 0};
@@ -534,7 +536,7 @@ static bool emit_and_loop(State* st) {
 
 static void ptr_button(void* d, wl_pointer*, uint32_t, uint32_t,
                         uint32_t btn, uint32_t state_val) {
-    Seat*  seat=(Seat*)d;
+    auto* seat = static_cast<Seat*>(d);
     State* st=seat->st;
     if (btn==BTN_RIGHT && state_val==WL_POINTER_BUTTON_STATE_PRESSED) {
         st->running=false; return;
@@ -545,7 +547,7 @@ static void ptr_button(void* d, wl_pointer*, uint32_t, uint32_t,
         st->pressing=true; st->has_sel=false;
         request_draw_output(seat->ptr_out);
         if (st->verbose) fprintf(stderr, "BUTTON: LMB DOWN at (%d,%d)\n",
-            (int)st->cur_x, (int)st->cur_y);
+            static_cast<int>(st->cur_x), static_cast<int>(st->cur_y));
     } else {
         const Box cleared_sel = st->sel;
         st->pressing=false;
@@ -593,7 +595,7 @@ static const wl_pointer_listener ptr_listener = {
 
 
 static void kbd_keymap(void* data, wl_keyboard*, uint32_t format, int32_t fd, uint32_t size) {
-    State* st = (State*)data;
+    auto* st = static_cast<State*>(data);
     if (format != WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1) { close(fd); return; }
     void* buf = mmap(nullptr, size, PROT_READ, MAP_SHARED, fd, 0);
     close(fd);
@@ -617,7 +619,7 @@ static bool reselect_held(State* st) {
 }
 
 static void kbd_key(void* data, wl_keyboard*, uint32_t, uint32_t, uint32_t keycode, uint32_t key_state) {
-    State* st = (State*)data;
+    auto* st = static_cast<State*>(data);
     if (key_state != WL_KEYBOARD_KEY_STATE_PRESSED) return;
     if (!st->xkb_st) return;
     xkb_keycode_t xkb_kc = keycode + 8;
@@ -636,7 +638,7 @@ static void kbd_key(void* data, wl_keyboard*, uint32_t, uint32_t, uint32_t keyco
     }
 }
 static void kbd_modifiers(void* data, wl_keyboard*, uint32_t, uint32_t mods_depressed, uint32_t mods_latched, uint32_t mods_locked, uint32_t group) {
-    State* st = (State*)data;
+    auto* st = static_cast<State*>(data);
     if (st->xkb_st)
         xkb_state_update_mask(st->xkb_st, mods_depressed, mods_latched, mods_locked, 0, 0, group);
 }
@@ -654,7 +656,7 @@ static const wl_keyboard_listener kbd_listener = {
 
 
 static void seat_caps(void* d, wl_seat* ws, uint32_t caps) {
-    Seat* seat=(Seat*)d; State* st=seat->st;
+    auto* seat=static_cast<Seat*>(d); State* st=seat->st;
     if ((caps&WL_SEAT_CAPABILITY_POINTER) && !seat->ptr) {
         seat->ptr = wl_seat_get_pointer(ws);
         wl_pointer_add_listener(seat->ptr, &ptr_listener, seat);
@@ -668,7 +670,7 @@ static void seat_caps(void* d, wl_seat* ws, uint32_t caps) {
             if (ss) {
                 char* end = nullptr;
                 long v = strtol(ss, &end, 10);
-                if (end != ss && v > 0 && v <= 256) sz = (int)v;
+                if (end != ss && v > 0 && v <= 256) sz = static_cast<int>(v);
             }
             seat->cur_theme = wl_cursor_theme_load(th,sz,st->shm);
             if (seat->cur_theme) {
@@ -689,49 +691,49 @@ static void seat_caps(void* d, wl_seat* ws, uint32_t caps) {
 static void seat_name(void*,wl_seat*,const char*){}
 static const wl_seat_listener seat_listener={.capabilities=seat_caps,.name=seat_name};
 
-static void xo_pos (void*d,zxdg_output_v1*,int32_t x,int32_t y){Output*o=(Output*)d;o->lx=x;o->ly=y;}
-static void xo_size(void*d,zxdg_output_v1*,int32_t w,int32_t h){Output*o=(Output*)d;o->lw=w;o->lh=h;}
+static void xo_pos (void*d,zxdg_output_v1*,int32_t x,int32_t y){auto*o=static_cast<Output*>(d);o->lx=x;o->ly=y;}
+static void xo_size(void*d,zxdg_output_v1*,int32_t w,int32_t h){auto*o=static_cast<Output*>(d);o->lw=w;o->lh=h;}
 static void xo_done(void*,zxdg_output_v1*){}
-static void xo_name(void*d,zxdg_output_v1*,const char*n){if(n)((Output*)d)->name=n;}
+static void xo_name(void*d,zxdg_output_v1*,const char*n){if(n)static_cast<Output*>(d)->name=n;}
 static void xo_desc(void*,zxdg_output_v1*,const char*){}
 static const zxdg_output_v1_listener xo_listener={
     .logical_position=xo_pos,.logical_size=xo_size,
     .done=xo_done,.name=xo_name,.description=xo_desc};
 
-static void wo_geom(void*d,wl_output*,int32_t x,int32_t y,int32_t,int32_t,int32_t,const char*,const char*,int32_t){Output*o=(Output*)d;o->px=x;o->py=y;}
-static void wo_mode(void*d,wl_output*,uint32_t f,int32_t w,int32_t h,int32_t){if(f&WL_OUTPUT_MODE_CURRENT){Output*o=(Output*)d;o->pw=w;o->ph=h;}}
-static void wo_done(void*d,wl_output*){Output*o=(Output*)d;if(o->lw==0&&o->pw>0){o->lx=o->px/o->scale;o->ly=o->py/o->scale;o->lw=o->pw/o->scale;o->lh=o->ph/o->scale;}}
-static void wo_scale(void*d,wl_output*,int32_t f){((Output*)d)->scale=f;}
-static void wo_name(void*d,wl_output*,const char*n){Output*o=(Output*)d;if(o->name.empty()&&n)o->name=n;}
+static void wo_geom(void*d,wl_output*,int32_t x,int32_t y,int32_t,int32_t,int32_t,const char*,const char*,int32_t){auto*o=static_cast<Output*>(d);o->px=x;o->py=y;}
+static void wo_mode(void*d,wl_output*,uint32_t f,int32_t w,int32_t h,int32_t){if(f&WL_OUTPUT_MODE_CURRENT){auto*o=static_cast<Output*>(d);o->pw=w;o->ph=h;}}
+static void wo_done(void*d,wl_output*){auto*o=static_cast<Output*>(d);if(o->lw==0&&o->pw>0){o->lx=o->px/o->scale;o->ly=o->py/o->scale;o->lw=o->pw/o->scale;o->lh=o->ph/o->scale;}}
+static void wo_scale(void*d,wl_output*,int32_t f){static_cast<Output*>(d)->scale=f;}
+static void wo_name(void*d,wl_output*,const char*n){auto*o=static_cast<Output*>(d);if(o->name.empty()&&n)o->name=n;}
 static void wo_desc(void*,wl_output*,const char*){}
 static const wl_output_listener wo_listener={.geometry=wo_geom,.mode=wo_mode,.done=wo_done,.scale=wo_scale,.name=wo_name,.description=wo_desc};
 
 static void reg_global(void* data, wl_registry* reg,
                         uint32_t name, const char* iface, uint32_t version) {
-    State* st=(State*)data;
+    auto* st=static_cast<State*>(data);
     if      (!strcmp(iface,wl_compositor_interface.name))
-        st->compositor=(wl_compositor*)wl_registry_bind(reg,name,&wl_compositor_interface,
-            std::min(version, 4u));
+        st->compositor=static_cast<wl_compositor*>(wl_registry_bind(reg,name,&wl_compositor_interface,
+            std::min(version, 4u)));
     else if (!strcmp(iface,wl_shm_interface.name))
-        st->shm=(wl_shm*)wl_registry_bind(reg,name,&wl_shm_interface,1);
+        st->shm=static_cast<wl_shm*>(wl_registry_bind(reg,name,&wl_shm_interface,1));
     else if (!strcmp(iface,zwlr_layer_shell_v1_interface.name))
-        st->shell=(zwlr_layer_shell_v1*)wl_registry_bind(reg,name,&zwlr_layer_shell_v1_interface,
-            std::min(version, (uint32_t)zwlr_layer_shell_v1_interface.version));
+        st->shell=static_cast<zwlr_layer_shell_v1*>(wl_registry_bind(reg,name,&zwlr_layer_shell_v1_interface,
+            std::min(version, static_cast<uint32_t>(zwlr_layer_shell_v1_interface.version))));
     else if (!strcmp(iface,zxdg_output_manager_v1_interface.name))
-        st->xdg_mgr=(zxdg_output_manager_v1*)wl_registry_bind(reg,name,&zxdg_output_manager_v1_interface,
-            std::min(version, (uint32_t)zxdg_output_manager_v1_interface.version));
+        st->xdg_mgr=static_cast<zxdg_output_manager_v1*>(wl_registry_bind(reg,name,&zxdg_output_manager_v1_interface,
+            std::min(version, static_cast<uint32_t>(zxdg_output_manager_v1_interface.version))));
     else if (!strcmp(iface,wp_cursor_shape_manager_v1_interface.name))
-        st->cursor_mgr=(wp_cursor_shape_manager_v1*)wl_registry_bind(reg,name,&wp_cursor_shape_manager_v1_interface,
-            std::min(version, (uint32_t)wp_cursor_shape_manager_v1_interface.version));
+        st->cursor_mgr=static_cast<wp_cursor_shape_manager_v1*>(wl_registry_bind(reg,name,&wp_cursor_shape_manager_v1_interface,
+            std::min(version, static_cast<uint32_t>(wp_cursor_shape_manager_v1_interface.version))));
     else if (!strcmp(iface,wl_output_interface.name)) {
         Output* out=new Output(); out->st=st;
-        out->wl_out=(wl_output*)wl_registry_bind(reg,name,&wl_output_interface,std::min(version, 4u));
+        out->wl_out=static_cast<wl_output*>(wl_registry_bind(reg,name,&wl_output_interface,std::min(version, 4u)));
         wl_output_add_listener(out->wl_out,&wo_listener,out);
         st->outputs.push_back(out);
     }
     else if (!strcmp(iface,wl_seat_interface.name)) {
         Seat* seat=new Seat(); seat->st=st;
-        seat->wl_s=(wl_seat*)wl_registry_bind(reg,name,&wl_seat_interface,std::min(version, 7u));
+        seat->wl_s=static_cast<wl_seat*>(wl_registry_bind(reg,name,&wl_seat_interface,std::min(version, 7u)));
         wl_seat_add_listener(seat->wl_s,&seat_listener,seat);
         g_seats.push_back(seat);
     }
@@ -741,17 +743,17 @@ static const wl_registry_listener reg_listener={.global=reg_global,.global_remov
 
 static void parse_stdin(State* st) {
     if (!st->force_stdin && isatty(STDIN_FILENO)) return;
-    char line[1024];
-    while (fgets(line,sizeof(line),stdin)) {
+    std::string line;
+    while (std::getline(std::cin, line)) {
         double x,y,w,h;
-        if (sscanf(line,"%lf,%lf %lfx%lf",&x,&y,&w,&h)!=4) continue;
+        if (sscanf(line.c_str(), "%lf,%lf %lfx%lf", &x, &y, &w, &h) != 4) continue;
         SnapRect sn; sn.rect={x,y,w,h};
-        char* p=strchr(line,' '); if(p) p=strchr(p+1,' ');
-        if (p) {
-            p++;
-            size_t len=strlen(p);
-            while(len>0&&(p[len-1]=='\n'||p[len-1]=='\r'))--len;
-            if(len>0) sn.label=std::string(p,len);
+        auto first = line.find(' ');
+        if (first != std::string::npos) {
+            auto second = line.find(' ', first + 1);
+            if (second != std::string::npos) {
+                sn.label = line.substr(second + 1);
+            }
         }
         st->snaps.push_back(sn);
     }
@@ -761,9 +763,9 @@ static std::string format_result(const State* st) {
     const Box& r=st->result;
     const Output* best_out=nullptr; double best=-1;
     for (const auto* o:st->outputs) {
-        double ix=std::max(r.x,(double)o->lx), iy=std::max(r.y,(double)o->ly);
-        double ix2=std::min(r.x+r.w,(double)(o->lx+o->lw));
-        double iy2=std::min(r.y+r.h,(double)(o->ly+o->lh));
+        double ix=std::max(r.x,static_cast<double>(o->lx)), iy=std::max(r.y,static_cast<double>(o->ly));
+        double ix2=std::min(r.x+r.w,static_cast<double>(o->lx+o->lw));
+        double iy2=std::min(r.y+r.h,static_cast<double>(o->ly+o->lh));
         double a=(ix2>ix&&iy2>iy)?(ix2-ix)*(iy2-iy):0;
         if(a>best){best=a;best_out=o;}
     }
@@ -781,12 +783,12 @@ static std::string format_result(const State* st) {
     for (const char* p=st->format.c_str(); *p; ++p) {
         if (*p=='%'&&*(p+1)) {
             switch(*++p) {
-            case 'x':out += std::to_string((int)r.x);break;
-            case 'y':out += std::to_string((int)r.y);break;
-            case 'w':out += std::to_string((int)r.w);break;
-            case 'h':out += std::to_string((int)r.h);break;
-            case 'X':out += std::to_string((int)(r.x+r.w));break;
-            case 'Y':out += std::to_string((int)(r.y+r.h));break;
+            case 'x':out += std::to_string(static_cast<int>(r.x));break;
+            case 'y':out += std::to_string(static_cast<int>(r.y));break;
+            case 'w':out += std::to_string(static_cast<int>(r.w));break;
+            case 'h':out += std::to_string(static_cast<int>(r.h));break;
+            case 'X':out += std::to_string(static_cast<int>(r.x+r.w));break;
+            case 'Y':out += std::to_string(static_cast<int>(r.y+r.h));break;
             case 'o':out += best_out ? best_out->name : "";break;
             case 'l':out += snap ? snap->label : "";break;
             case '%':out += '%';break;
@@ -809,10 +811,6 @@ int main(int argc, char* argv[]) {
     sigaction(SIGINT,&sa,nullptr); sigaction(SIGTERM,&sa,nullptr);
 
     State st;
-    st.ui_font = cairo_toy_font_face_create("sans-serif",
-        CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
-    st.mono_font = cairo_toy_font_face_create("monospace",
-        CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
     for (int i=1;i<argc;i++) {
         if      (!strcmp(argv[i],"-f")&&i+1<argc) st.format=argv[++i];
         else if (!strcmp(argv[i],"-d")) st.show_dims  =true;
@@ -862,6 +860,11 @@ int main(int argc, char* argv[]) {
         fprintf(stderr,"cullpp: missing required Wayland globals\n"); return 1;
     }
 
+    st.ui_font = cairo_toy_font_face_create("sans-serif",
+        CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+    st.mono_font = cairo_toy_font_face_create("monospace",
+        CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+
     if (st.xdg_mgr)
         for (auto* out:st.outputs) {
             out->xdg_out=zxdg_output_manager_v1_get_xdg_output(st.xdg_mgr,out->wl_out);
@@ -875,8 +878,8 @@ int main(int argc, char* argv[]) {
     if (st.output_mode)
         for (const auto* o:st.outputs)
             if(o->lw>0)
-                st.snaps.push_back({{(double)o->lx,(double)o->ly,
-                                     (double)o->lw,(double)o->lh},o->name});
+                st.snaps.push_back({{static_cast<double>(o->lx),static_cast<double>(o->ly),
+                                     static_cast<double>(o->lw),static_cast<double>(o->lh)},o->name});
 
     for (auto* out:st.outputs) output_create_surface(out);
     wl_display_roundtrip(st.display);
@@ -968,6 +971,6 @@ done:
     if (st.ui_font)    cairo_font_face_destroy(st.ui_font);
     if (st.mono_font)  cairo_font_face_destroy(st.mono_font);
     wl_display_disconnect(st.display);
-    if (!result_text.empty()) fputs(result_text.c_str(), stdout);
+    if (!result_text.empty()) std::cout << result_text;
     return rc;
 }
