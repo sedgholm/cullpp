@@ -1,113 +1,108 @@
 
-![cullpp](https://codeberg.org/attachments/c1755a2b-ba09-4c1e-b78c-a1a8dae5f1e6)
+![cullpp](https://codeberg.org/attachments/f5a95b1c-99b0-4b37-9587-ee6a5bd9c534)
 
-![Wayland](https://img.shields.io/badge/Wayland-v1.0+-yellow.svg)
-![C++17](https://img.shields.io/badge/C%2B%2B17-purple.svg)
+![C++17](https://img.shields.io/badge/C%2B%2B17-purple?style=flat-square)
+![Wayland](https://img.shields.io/badge/Wayland-v1.0+-yellow?style=flat-square)
 
-Interactive region selector for wlroots-based Wayland compositors. Outputs geometry data to stdout for integration with screenshot, recording, and window management tools or custom scripts.
+Interactive region selector for wlroots-based wayland compositors. outputs geometry data to stdout.
 
-## Current design goals
+## build
 
-- fast pointer response
-- predictable multi-output behavior
-- simple shell integration
-- safe rendering over aggressive hacks
+deps: `wayland-client`, `wayland-cursor`, `cairo`, `xkbcommon` + generated protocol sources in `out/protocol`
 
-## Build
-
-### Dependencies
-
-- `wayland-client`
-- `wayland-cursor`
-- `cairo`
-- `xkbcommon`
-- generated protocol sources in `out/protocol` must be present
-
-### Build with Ninja
-
-```sh
+```
 ninja
 ./cullpp -h
 
-# install
 ninja -v install
 ```
 
-## Usage
+## usage
 
-### Basic region selection
-
-```sh
+basic:
+```
 cullpp
-# verbose mode frame timing, damage regions
 cullpp -v
 ```
 
-```sh
-grim -g "$(cullpp)" ~/screenshot.png
-
-wf-recorder -g "$(cullpp)" -f output.mp4
-
-swaymsg "resize set $(cullpp -f '%w %h'); move position $(cullpp -f '%x %y')"
-
-grim -g "$(cullpp)" - | wl-copy
+pipe it:
 ```
-```sh
-# OCR a selected region
+wf-recorder -g "$(cullpp)" -f output.mp4
+# upload files
+grim -g "$(cullpp)" - | curl -s -F "files[]=@-" https://uguu.se/upload
+```
+
+ocr:
+```
 grim -g "$(cullpp)" -t ppm - | tesseract stdin stdout
-
-# OCR and clean the output a bit
 grim -g "$(cullpp)" -t ppm - | tesseract stdin stdout | sed '/^[[:space:]]*$/d'
+```
 
-# point-pick a single pixel and print its color
+pixel pick:
+```
 grim -g "$(cullpp -p -f '%x,%y 1x1')" -t ppm - | magick - -format '%[pixel:p{0,0}]\n' info:
+```
 
-# emit JSON geometry for scripts
+json:
+```
 cullpp -f '{"x":%x,"y":%y,"w":%w,"h":%h,"right":%X,"bottom":%Y,"output":"%o","label":"%l"}' | jq .
+```
 
-# pick a full output as a snap rect and capture that monitor
+full output pick:
+```
 grim -g "$(cullpp -o)" selected-output.png
 ```
 
-## Format tokens
+## format tokens
 
-| Token | Meaning |
-|------|--------|
-| `%x` | left edge |
-| `%y` | top edge |
-| `%w` | width |
-| `%h` | height |
-| `%X` | right edge |
-| `%Y` | bottom edge |
-| `%o` | output name with largest overlap |
-| `%l` | matching stdin/snap label |
-| `%%` | literal percent |
+%x left, %y top, %w width, %h height, %X right, %Y bottom, %o output name, %l snap label, %% literal
 
-### Default output
-
-```sh
+default output:
+```
 %x,%y %wx%h
 ```
 
-## Stdin snap rectangles
+## stdin snap rectangles
 
-### Input format
-
+input format:
 ```
 x,y wxh
 x,y wxh label
 ```
 
-### Example
-
-```sh
+example:
+```
 printf '0,0 1920x1080 left\n1920,0 1920x1080 right\n' | cullpp -r
 ```
 
-## Notes
+## env
 
-- The renderer currently favors correctness and low-latency input handling over overly aggressive repaint tricks.
-- Multi-output behavior is still the most sensitive area. Test `-o`, crosshair, and drag-across-monitor flows on your compositor before publishing a release.
-- If you use command substitution, the printed result is emitted after the Wayland teardown path completes.
+CULLPP_RESELECT_MOD  reselect modifier def: Shift
+
+set it:
+```
+export CULLPP_RESELECT_MOD=Control
+```
+
+or one-off:
+```
+CULLPP_RESELECT_MOD=Control cullpp
+```
+> [!TIP]
+> Defaults live in `main.cpp` if you want to build your own preset.
+## volunteer
+
+found a bug? want to patch something? open an issue on codeberg:
+
+https://codeberg.org/qel/cullpp/issues
+
+or hit up the srht mailing list: [~flnt/list@lists.sr.ht]
+
+## notes
+
+- renderer favors correctness and low-latency input over aggressive repaint tricks
+- multi-output is the most sensitive area. test -o, crosshair, and drag-across-monitor on your compositor before shipping
+- with command substitution the result prints after wayland teardown completes
 
 ## License under [MIT](LICENSE)
+
