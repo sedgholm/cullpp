@@ -489,7 +489,7 @@ static void ptr_motion(void* d, wl_pointer*, uint32_t,
     if (st->pressing) {
         st->sel.x=std::min(st->anchor_x,gx); st->sel.y=std::min(st->anchor_y,gy);
         st->sel.w=std::abs(gx-st->anchor_x); st->sel.h=std::abs(gy-st->anchor_y);
-        st->has_sel = st->sel.w>3 && st->sel.h>3;
+        st->has_sel = st->sel.w>0 && st->sel.h>0;
         selection_changed =
             st->sel.x != prev_sel.x || st->sel.y != prev_sel.y ||
             st->sel.w != prev_sel.w || st->sel.h != prev_sel.h ||
