@@ -872,7 +872,6 @@ int main(int argc, char* argv[]) {
         }
 
     wl_display_roundtrip(st.display);
-    wl_display_roundtrip(st.display);
 
     parse_stdin(&st);
     if (st.output_mode)
