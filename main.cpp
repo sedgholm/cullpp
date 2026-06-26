@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <array>
 #include <iostream>
+#include <limits>
 
 
 static uint32_t BgColor = 0x4A4A4A57; //0x25214257
@@ -46,6 +47,7 @@ extern "C" {
 
 static volatile sig_atomic_t g_quit = 0;
 static void on_signal(int) { g_quit = 1; }
+static void on_bus(int, siginfo_t*, void*) { _exit(1); }
 
 struct State;
 
@@ -63,13 +65,15 @@ struct Output {
     zwlr_layer_surface_v1*  layer_surf = nullptr;
     wl_surface*             surface    = nullptr;
     wl_callback*            frame_cb   = nullptr;
+    uint32_t                global_name= 0;
 
     int lx=0,ly=0,lw=0,lh=0;
     int px=0,py=0,pw=0,ph=0;
+    int surf_w=0,surf_h=0;
     int scale=1;
     std::string name;
 
-    Pool pool;
+    ShmPool pool;
     bool configured= false;
     bool needs_draw= false;
 };
@@ -95,7 +99,6 @@ struct State {
     bool   confirmed = false;
     bool   running   = true;
 
-		wl_keyboard*  kbd      = nullptr;
     xkb_context* xkb_ctx  = nullptr;
     xkb_keymap*   xkb_map  = nullptr;
     xkb_state*   xkb_st   = nullptr;
@@ -186,6 +189,13 @@ static double selection_damage_pad() {
     return BorderWidth > 0.0 ? BorderWidth * 0.5 : 0.0;
 }
 
+static int32_t scaled_extent(int value, int scale) {
+    if (value <= 0 || scale <= 0) return 0;
+    if (value > std::numeric_limits<int32_t>::max() / scale)
+        return std::numeric_limits<int32_t>::max();
+    return static_cast<int32_t>(value * scale);
+}
+
 static void unmap_outputs(State* st) {
     for (auto* out : st->outputs) {
         if (!out->surface) continue;
@@ -207,11 +217,15 @@ static bool render(Output* out) {
     if (st->verbose) fprintf(stderr, "RENDER: output %p geo=(%d,%d %dx%d) sel=%d pressing=%d\n",
         static_cast<void*>(out), out->lx, out->ly, out->lw, out->lh, st->has_sel, st->pressing);
 
-    PoolBuf* pb = pool_next_buf(out->pool);
+    ShmBuffer* pb = out->pool.nextBuffer();
     if (!pb) { out->needs_draw = true; return false; }  // both buffers in-flight
 
     cairo_t* cr = pb->cr;
-    if (!cr) { out->needs_draw = true; return false; }
+    if (!cr) {
+        pb->busy.store(false, std::memory_order_release);
+        out->needs_draw = true;
+        return false;
+    }
 
     // apply HiDPI scale so all drawing coords are logical pixels.
     cairo_reset_clip(cr);
@@ -350,11 +364,12 @@ static bool render(Output* out) {
 
     wl_surface_attach(out->surface, pb->wl, 0, 0);
 
-    wl_surface_damage(out->surface, 0, 0, out->lw, out->lh);
     wl_surface_set_buffer_scale(out->surface, out->scale);
+    wl_surface_damage_buffer(out->surface, 0, 0,
+        scaled_extent(out->surf_w, out->scale),
+        scaled_extent(out->surf_h, out->scale));
     wl_surface_commit(out->surface);
-    // pool_next_buf already marked buffer busy atomically
-    out->pool.idx ^= 1;
+    out->pool.advance();
     return true;
 }
 
@@ -371,8 +386,18 @@ static void ls_configure(void* data, zwlr_layer_surface_v1* ls,
                           uint32_t serial, uint32_t w, uint32_t h) {
     auto* out = static_cast<Output*>(data);
     zwlr_layer_surface_v1_ack_configure(ls, serial);
-    if (!pool_init(out->pool, out->st->shm, static_cast<int>(w), static_cast<int>(h), out->scale)) {
-        fprintf(stderr, "cullpp: pool_init failed (%ux%u scale=%d)\n", w, h, out->scale);
+
+    if (w > static_cast<uint32_t>(std::numeric_limits<int>::max()) ||
+        h > static_cast<uint32_t>(std::numeric_limits<int>::max())) {
+        fprintf(stderr, "cullpp: layer surface configure is too large (%ux%u)\n", w, h);
+        out->st->running = false;
+        return;
+    }
+
+    out->surf_w = static_cast<int>(w);
+    out->surf_h = static_cast<int>(h);
+    if (!out->pool.reset(out->st->shm, out->surf_w, out->surf_h, out->scale)) {
+        fprintf(stderr, "cullpp: shm pool reset failed (%ux%u scale=%d)\n", w, h, out->scale);
         out->st->running = false;
         return;
     }
@@ -406,14 +431,110 @@ struct Seat {
     State*   st      = nullptr;
     wl_seat* wl_s    = nullptr;
     wl_pointer* ptr  = nullptr;
+    wl_keyboard* kbd = nullptr;
     Output*  ptr_out = nullptr;
     uint32_t ptr_ser = 0;
+    uint32_t global_name = 0;
     wp_cursor_shape_device_v1* shape_dev = nullptr;
     wl_cursor_theme* cur_theme = nullptr;
     wl_cursor*       cur       = nullptr;
     wl_surface*      cur_surf  = nullptr;
 };
 static std::vector<Seat*> g_seats;
+
+static void release_output(wl_output*& output) {
+    if (!output) return;
+    if (wl_output_get_version(output) >= 3)
+        wl_output_release(output);
+    else
+        wl_output_destroy(output);
+    output = nullptr;
+}
+
+static void release_pointer(wl_pointer*& ptr) {
+    if (!ptr) return;
+    if (wl_pointer_get_version(ptr) >= 3)
+        wl_pointer_release(ptr);
+    else
+        wl_pointer_destroy(ptr);
+    ptr = nullptr;
+}
+
+static void release_keyboard(wl_keyboard*& kbd) {
+    if (!kbd) return;
+    if (wl_keyboard_get_version(kbd) >= 3)
+        wl_keyboard_release(kbd);
+    else
+        wl_keyboard_destroy(kbd);
+    kbd = nullptr;
+}
+
+static void release_seat(wl_seat*& seat) {
+    if (!seat) return;
+    if (wl_seat_get_version(seat) >= 5)
+        wl_seat_release(seat);
+    else
+        wl_seat_destroy(seat);
+    seat = nullptr;
+}
+
+static void destroy_output(Output* out) {
+    if (!out) return;
+
+    for (auto* seat : g_seats)
+        if (seat->ptr_out == out)
+            seat->ptr_out = nullptr;
+
+    if (out->frame_cb) {
+        wl_callback_destroy(out->frame_cb);
+        out->frame_cb = nullptr;
+    }
+    out->pool.destroy();
+    if (out->layer_surf) {
+        zwlr_layer_surface_v1_destroy(out->layer_surf);
+        out->layer_surf = nullptr;
+    }
+    if (out->surface) {
+        wl_surface_destroy(out->surface);
+        out->surface = nullptr;
+    }
+    if (out->xdg_out) {
+        zxdg_output_v1_destroy(out->xdg_out);
+        out->xdg_out = nullptr;
+    }
+    release_output(out->wl_out);
+    delete out;
+}
+
+static void destroy_pointer(Seat* seat) {
+    if (!seat) return;
+
+    if (seat->shape_dev) {
+        wp_cursor_shape_device_v1_destroy(seat->shape_dev);
+        seat->shape_dev = nullptr;
+    }
+    if (seat->cur_surf) {
+        wl_surface_destroy(seat->cur_surf);
+        seat->cur_surf = nullptr;
+    }
+    if (seat->cur_theme) {
+        wl_cursor_theme_destroy(seat->cur_theme);
+        seat->cur_theme = nullptr;
+        seat->cur = nullptr;
+    }
+    release_pointer(seat->ptr);
+    seat->ptr_out = nullptr;
+    seat->ptr_ser = 0;
+}
+
+static void destroy_seat(Seat* seat) {
+    if (!seat) return;
+
+    destroy_pointer(seat);
+    release_keyboard(seat->kbd);
+    release_seat(seat->wl_s);
+    delete seat;
+}
 
 static void set_cursor(Seat* seat, uint32_t serial) {
     if (seat->shape_dev)
@@ -680,13 +801,17 @@ static void seat_caps(void* d, wl_seat* ws, uint32_t caps) {
             if (seat->cur) seat->cur_surf=wl_compositor_create_surface(st->compositor);
         }
     }
+    if (!(caps & WL_SEAT_CAPABILITY_POINTER) && seat->ptr)
+        destroy_pointer(seat);
 
-		    if ((caps & WL_SEAT_CAPABILITY_KEYBOARD) && !st->kbd) {
+    if ((caps & WL_SEAT_CAPABILITY_KEYBOARD) && !seat->kbd) {
         if (!st->xkb_ctx)
             st->xkb_ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
-        st->kbd = wl_seat_get_keyboard(ws);
-        wl_keyboard_add_listener(st->kbd, &kbd_listener, st);
+        seat->kbd = wl_seat_get_keyboard(ws);
+        wl_keyboard_add_listener(seat->kbd, &kbd_listener, st);
     }
+    if (!(caps & WL_SEAT_CAPABILITY_KEYBOARD) && seat->kbd)
+        release_keyboard(seat->kbd);
 }
 static void seat_name(void*,wl_seat*,const char*){}
 static const wl_seat_listener seat_listener={.capabilities=seat_caps,.name=seat_name};
@@ -703,7 +828,21 @@ static const zxdg_output_v1_listener xo_listener={
 static void wo_geom(void*d,wl_output*,int32_t x,int32_t y,int32_t,int32_t,int32_t,const char*,const char*,int32_t){auto*o=static_cast<Output*>(d);o->px=x;o->py=y;}
 static void wo_mode(void*d,wl_output*,uint32_t f,int32_t w,int32_t h,int32_t){if(f&WL_OUTPUT_MODE_CURRENT){auto*o=static_cast<Output*>(d);o->pw=w;o->ph=h;}}
 static void wo_done(void*d,wl_output*){auto*o=static_cast<Output*>(d);if(o->lw==0&&o->pw>0){o->lx=o->px/o->scale;o->ly=o->py/o->scale;o->lw=o->pw/o->scale;o->lh=o->ph/o->scale;}}
-static void wo_scale(void*d,wl_output*,int32_t f){static_cast<Output*>(d)->scale=f;}
+static void wo_scale(void*d,wl_output*,int32_t f){
+    auto* o=static_cast<Output*>(d);
+    if (f <= 0 || o->scale == f) return;
+
+    o->scale=f;
+    if (!o->configured || o->surf_w <= 0 || o->surf_h <= 0) return;
+
+    if (!o->pool.reset(o->st->shm, o->surf_w, o->surf_h, o->scale)) {
+        fprintf(stderr, "cullpp: shm pool reset failed (%dx%d scale=%d)\n",
+            o->surf_w, o->surf_h, o->scale);
+        o->st->running = false;
+        return;
+    }
+    request_draw_output(o);
+}
 static void wo_name(void*d,wl_output*,const char*n){auto*o=static_cast<Output*>(d);if(o->name.empty()&&n)o->name=n;}
 static void wo_desc(void*,wl_output*,const char*){}
 static const wl_output_listener wo_listener={.geometry=wo_geom,.mode=wo_mode,.done=wo_done,.scale=wo_scale,.name=wo_name,.description=wo_desc};
@@ -727,18 +866,41 @@ static void reg_global(void* data, wl_registry* reg,
             std::min(version, static_cast<uint32_t>(wp_cursor_shape_manager_v1_interface.version))));
     else if (!strcmp(iface,wl_output_interface.name)) {
         Output* out=new Output(); out->st=st;
+        out->global_name=name;
         out->wl_out=static_cast<wl_output*>(wl_registry_bind(reg,name,&wl_output_interface,std::min(version, 4u)));
         wl_output_add_listener(out->wl_out,&wo_listener,out);
         st->outputs.push_back(out);
     }
     else if (!strcmp(iface,wl_seat_interface.name)) {
         Seat* seat=new Seat(); seat->st=st;
+        seat->global_name=name;
         seat->wl_s=static_cast<wl_seat*>(wl_registry_bind(reg,name,&wl_seat_interface,std::min(version, 7u)));
         wl_seat_add_listener(seat->wl_s,&seat_listener,seat);
         g_seats.push_back(seat);
     }
 }
-static void reg_remove(void*,wl_registry*,uint32_t){}
+static void reg_remove(void* data,wl_registry*,uint32_t name){
+    auto* st=static_cast<State*>(data);
+
+    auto out_it = std::find_if(st->outputs.begin(), st->outputs.end(),
+        [name](const Output* out) { return out->global_name == name; });
+    if (out_it != st->outputs.end()) {
+        Output* out = *out_it;
+        st->outputs.erase(out_it);
+        destroy_output(out);
+        if (st->outputs.empty())
+            st->running = false;
+        return;
+    }
+
+    auto seat_it = std::find_if(g_seats.begin(), g_seats.end(),
+        [name](const Seat* seat) { return seat->global_name == name; });
+    if (seat_it != g_seats.end()) {
+        Seat* seat = *seat_it;
+        g_seats.erase(seat_it);
+        destroy_seat(seat);
+    }
+}
 static const wl_registry_listener reg_listener={.global=reg_global,.global_remove=reg_remove};
 
 static void parse_stdin(State* st) {
@@ -810,6 +972,10 @@ int main(int argc, char* argv[]) {
     sa.sa_handler=on_signal; sigemptyset(&sa.sa_mask);
     sigaction(SIGINT,&sa,nullptr); sigaction(SIGTERM,&sa,nullptr);
 
+    struct sigaction bus{};
+    bus.sa_sigaction=on_bus; sigemptyset(&bus.sa_mask); bus.sa_flags=SA_SIGINFO;
+    sigaction(SIGBUS,&bus,nullptr);
+
     State st;
     for (int i=1;i<argc;i++) {
         if      (!strcmp(argv[i],"-f")&&i+1<argc) st.format=argv[++i];
@@ -820,8 +986,12 @@ int main(int argc, char* argv[]) {
         else if (!strcmp(argv[i],"-r")) st.force_stdin=true;
         else if (!strcmp(argv[i],"-v")) st.verbose=true;
 
-				else if (!strcmp(argv[i],"--bg") && i+1<argc) BgColor = parse_hex_color(argv[++i]);
-        else if (!strcmp(argv[i],"--border") && i+1<argc) BorderColor = parse_hex_color(argv[++i]);
+				else if (!strcmp(argv[i],"--bg") && i+1<argc) {
+            uint32_t c = parse_hex_color(argv[++i]); if (!c) return 1; BgColor = c;
+        }
+        else if (!strcmp(argv[i],"--border") && i+1<argc) {
+            uint32_t c = parse_hex_color(argv[++i]); if (!c) return 1; BorderColor = c;
+        }
         else if (!strcmp(argv[i],"--border-width") && i+1<argc) { char* e=nullptr; double v=strtod(argv[++i],&e); if(e!=argv[i]&&v>0) BorderWidth=v; }
         else if (!strcmp(argv[i],"-h")||!strcmp(argv[i],"--help")) {
             fprintf(stderr,
@@ -938,26 +1108,16 @@ done:
 
     if (st.confirmed || g_quit) unmap_outputs(&st);
     for (auto* out:st.outputs) {
-        if (out->frame_cb) { wl_callback_destroy(out->frame_cb); out->frame_cb=nullptr; }
-        pool_destroy(out->pool);
-        if (out->layer_surf) zwlr_layer_surface_v1_destroy(out->layer_surf);
-        if (out->surface)    wl_surface_destroy(out->surface);
-        if (out->xdg_out)    zxdg_output_v1_destroy(out->xdg_out);
-        if (out->wl_out)     wl_output_release(out->wl_out);
-        delete out;
+        destroy_output(out);
     }
+    st.outputs.clear();
     for (auto* s:g_seats) {
-        if (s->shape_dev)  wp_cursor_shape_device_v1_destroy(s->shape_dev);
-        if (s->cur_surf)   wl_surface_destroy(s->cur_surf);
-        if (s->cur_theme)  wl_cursor_theme_destroy(s->cur_theme);
-        if (s->ptr)        wl_pointer_release(s->ptr);
-        if (s->wl_s)       wl_seat_release(s->wl_s);
-        delete s;
+        destroy_seat(s);
     }
+    g_seats.clear();
 
     if (st.confirmed || g_quit) wl_display_roundtrip(st.display);
 
-		if (st.kbd)     wl_keyboard_destroy(st.kbd);
     if (st.xkb_st)  xkb_state_unref(st.xkb_st);
     if (st.xkb_map) xkb_keymap_unref(st.xkb_map);
     if (st.xkb_ctx) xkb_context_unref(st.xkb_ctx);
