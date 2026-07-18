@@ -15,6 +15,7 @@ deps:
 
 ```
 git clone https://codeberg.org/qel/cullpp.git
+cd cullpp/
 ninja
 ninja -v install
 ```
