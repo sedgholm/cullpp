@@ -1,23 +1,35 @@
 builddir = out
-version = 1.0.0-rc.2
-commonflags = -O2 -Wall -Wextra -I$builddir/protocol -Iprotocol $$(pkg-config --cflags wayland-client wayland-cursor xkbcommon cairo)
-cflags = $commonflags
-cppflags = -std=c++17 -DCULLPP_VERSION=\"$version\" $commonflags
-ldflags = $$(pkg-config --libs wayland-client wayland-cursor xkbcommon cairo)
+version = 2.0.0
+outname = cullpp
+
+cflags = -O2 -Wall -Wextra -Wpedantic $
+  -Wconversion -Wsign-conversion -Wformat=2 -Wformat-security $
+  -Wimplicit-fallthrough -Wnull-dereference -Wduplicated-cond $
+  -Wlogical-op $
+  -Wno-error=conversion -Wno-error=sign-conversion
+
+cppflags = -std=c++23 -DCULLPP_VERSION=\"$version\" $
+  -Wnon-virtual-dtor -Wold-style-cast -Wuseless-cast $
+  $cflags
+
+pkg_inc = $$(pkg-config --cflags wayland-client wayland-cursor xkbcommon cairo)
+pkg_lib = $$(pkg-config --libs wayland-client wayland-cursor xkbcommon cairo)
+incflags = -I$builddir/protocol -Iprotocol $pkg_inc
+ldflags = $pkg_lib
 
 rule scanner_header
-  command = sh -c 'mkdir -p "$$(dirname "$$2")" && wayland-scanner client-header "$$1" "$$2"' sh $in $out
+  command = mkdir -p $builddir/protocol && wayland-scanner client-header $in $out
 
 rule scanner_code
-  command = sh -c 'mkdir -p "$$(dirname "$$2")" && wayland-scanner private-code "$$1" "$$2"' sh $in $out
+  command = mkdir -p $builddir/protocol && wayland-scanner private-code $in $out
 
 rule cc
-  command = cc -MMD -MF $out.d $cflags -c $in -o $out
+  command = cc -MMD -MF $out.d $cflags $incflags -c $in -o $out
   depfile = $out.d
   deps = gcc
 
 rule cxx
-  command = c++ -MMD -MF $out.d $cppflags -c $in -o $out
+  command = c++ -MMD -MF $out.d $cppflags $incflags -c $in -o $out
   depfile = $out.d
   deps = gcc
 
@@ -25,7 +37,7 @@ rule link
   command = c++ $in -o $out $ldflags
 
 rule install
-  command = cp cullpp /usr/local/bin/
+  command = install -D -m 755 $outname $${DESTDIR}/usr/local/bin/cullpp
 
 build $builddir/protocol/wlr-layer-shell-unstable-v1-client-protocol.h: scanner_header protocol/wlr-layer-shell-unstable-v1.xml
 build $builddir/protocol/wlr-layer-shell-unstable-v1-protocol.c: scanner_code protocol/wlr-layer-shell-unstable-v1.xml
@@ -42,6 +54,7 @@ build $builddir/main.o: cxx main.cpp || $
   $builddir/protocol/wlr-layer-shell-unstable-v1-client-protocol.h $
   $builddir/protocol/xdg-output-unstable-v1-client-protocol.h $
   $builddir/protocol/cursor-shape-v1-client-protocol.h
+
 build $builddir/shm-pool.o: cxx shm-pool.cpp
 
 build $builddir/wlr-layer-shell-unstable-v1-protocol.o: cc $builddir/protocol/wlr-layer-shell-unstable-v1-protocol.c
@@ -50,7 +63,7 @@ build $builddir/cursor-shape-v1-protocol.o: cc $builddir/protocol/cursor-shape-v
 build $builddir/xdg-shell-protocol.o: cc $builddir/protocol/xdg-shell-protocol.c
 build $builddir/tablet-unstable-v2-protocol.o: cc $builddir/protocol/tablet-unstable-v2-protocol.c
 
-build cullpp: link $
+build $outname: link $
   $builddir/main.o $
   $builddir/shm-pool.o $
   $builddir/wlr-layer-shell-unstable-v1-protocol.o $
@@ -59,6 +72,6 @@ build cullpp: link $
   $builddir/xdg-shell-protocol.o $
   $builddir/tablet-unstable-v2-protocol.o
 
-default cullpp
+default $outname
 
-build install: install cullpp
+build install: install $outname

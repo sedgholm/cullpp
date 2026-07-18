@@ -7,19 +7,20 @@
 
 #include <cstdint>
 #include <fcntl.h>
+#include <algorithm>
 #include <limits>
 
-static constexpr size_t MAX_POOL_SIZE = 64 * 1024 * 1024;
+static constexpr size_t kMaxPoolSize = 256 * 1024 * 1024;
 
-static int make_shm_fd(size_t sz) {
-    if (sz == 0 || sz > MAX_POOL_SIZE ||
-        sz > static_cast<size_t>(std::numeric_limits<int32_t>::max()))
+static int createShmFd(size_t size_bytes) {
+    if (size_bytes == 0 || size_bytes > kMaxPoolSize ||
+        size_bytes > static_cast<size_t>(std::numeric_limits<int32_t>::max()))
         return -1;
 
     int fd = static_cast<int>(syscall(SYS_memfd_create, "cullpp-pool", MFD_CLOEXEC));
     if (fd < 0) return -1;
 
-    if (posix_fallocate(fd, 0, static_cast<off_t>(sz)) != 0) {
+    if (posix_fallocate(fd, 0, static_cast<off_t>(size_bytes)) != 0) {
         close(fd);
         return -1;
     }
@@ -27,37 +28,57 @@ static int make_shm_fd(size_t sz) {
     return fd;
 }
 
-static void buffer_release(void* data, wl_buffer*) {
+static void onBufferRelease(void* data, wl_buffer*) {
     auto* b = static_cast<ShmBuffer*>(data);
     b->busy.store(false, std::memory_order_release);
 }
 
-static const wl_buffer_listener buffer_listener = { .release = buffer_release };
+static const wl_buffer_listener buffer_listener = { .release = onBufferRelease };
 
-static bool checked_scale(int n, int scale, int* out) {
-    if (n <= 0 || scale <= 0) return false;
+static bool tryScaleDimension(int value, int scale, int* result) {
+    if (value <= 0 || scale <= 0) return false;
 
-    const auto un = static_cast<size_t>(n);
-    const auto us = static_cast<size_t>(scale);
-    const auto max = static_cast<size_t>(std::numeric_limits<int>::max());
-    if (un > max / us) return false;
+    const auto unsigned_value = static_cast<size_t>(value);
+    const auto unsigned_scale = static_cast<size_t>(scale);
+    const auto max_value = static_cast<size_t>(std::numeric_limits<int>::max());
+    if (unsigned_value > max_value / unsigned_scale) return false;
 
-    *out = static_cast<int>(un * us);
+    *result = static_cast<int>(unsigned_value * unsigned_scale);
     return true;
 }
 
-static bool checked_mul(size_t a, size_t b, size_t* out) {
-    const size_t max = std::numeric_limits<size_t>::max();
-    if (a != 0 && b > max / a) return false;
+static bool tryMultiplySize(size_t a, size_t b, size_t* result) {
+    const size_t max_value = std::numeric_limits<size_t>::max();
+    if (a != 0 && b > max_value / a) return false;
 
-    *out = a * b;
+    *result = a * b;
     return true;
 }
 
-static void destroy_storage(wl_shm_pool*& wl_pool, int& fd, void*& data, size_t& size) {
-    if (wl_pool) {
-        wl_shm_pool_destroy(wl_pool);
-        wl_pool = nullptr;
+static ShmDamage fullDamage(int width, int height) {
+    if (width <= 0 || height <= 0) return {};
+    return {0, 0, width, height};
+}
+
+static void extendDamage(ShmDamage& target, const ShmDamage& damage) {
+    if (damage.empty()) return;
+
+    if (target.empty()) {
+        target = damage;
+        return;
+    }
+
+    const int left = std::min(target.x, damage.x);
+    const int top = std::min(target.y, damage.y);
+    const int right = std::max(target.x + target.width, damage.x + damage.width);
+    const int bottom = std::max(target.y + target.height, damage.y + damage.height);
+    target = {left, top, right - left, bottom - top};
+}
+
+static void destroyStorage(wl_shm_pool*& shm_pool_handle, int& fd, void*& data, size_t& size) {
+    if (shm_pool_handle) {
+        wl_shm_pool_destroy(shm_pool_handle);
+        shm_pool_handle = nullptr;
     }
     if (data && data != MAP_FAILED) {
         munmap(data, size);
@@ -74,7 +95,7 @@ ShmPool::~ShmPool() {
     destroy();
 }
 
-bool ShmPool::bufferBusy(const std::unique_ptr<ShmBuffer>& b) {
+bool ShmPool::isBufferBusy(const std::unique_ptr<ShmBuffer>& b) {
     return b && b->busy.load(std::memory_order_acquire);
 }
 
@@ -85,32 +106,34 @@ void ShmPool::destroyBuffer(std::unique_ptr<ShmBuffer>& b) {
         cairo_destroy(b->cr);
         b->cr = nullptr;
     }
-    if (b->cs) {
-        cairo_surface_destroy(b->cs);
-        b->cs = nullptr;
+    if (b->cairo_surface) {
+        cairo_surface_destroy(b->cairo_surface);
+        b->cairo_surface = nullptr;
     }
-    if (b->wl) {
-        wl_buffer_destroy(b->wl);
-        b->wl = nullptr;
+    if (b->wl_buffer_handle) {
+        wl_buffer_destroy(b->wl_buffer_handle);
+        b->wl_buffer_handle = nullptr;
     }
 
     b->busy.store(false, std::memory_order_release);
     b.reset();
 }
 
-bool ShmPool::retiredBusy(const Retired& r) {
-    return bufferBusy(r.bufs[0]) || bufferBusy(r.bufs[1]);
+bool ShmPool::isRetiredBusy(const Retired& r) {
+    for (int i = 0; i < kBufferCount; ++i)
+        if (isBufferBusy(r.buffers[i])) return true;
+    return false;
 }
 
 void ShmPool::destroyRetired(Retired& r) {
-    destroyBuffer(r.bufs[0]);
-    destroyBuffer(r.bufs[1]);
-    destroy_storage(r.wl_pool, r.fd, r.data, r.size);
+    for (int i = 0; i < kBufferCount; ++i)
+        destroyBuffer(r.buffers[i]);
+    destroyStorage(r.shm_pool_handle, r.fd, r.data, r.size);
 }
 
 void ShmPool::purgeRetired() {
     for (auto it = retired_.begin(); it != retired_.end(); ) {
-        if (retiredBusy(*it)) {
+        if (isRetiredBusy(*it)) {
             ++it;
             continue;
         }
@@ -121,37 +144,41 @@ void ShmPool::purgeRetired() {
 }
 
 void ShmPool::destroyActive() {
-    destroyBuffer(bufs_[0]);
-    destroyBuffer(bufs_[1]);
-    destroy_storage(wl_pool_, fd_, data_, size_);
+    for (int i = 0; i < kBufferCount; ++i)
+        destroyBuffer(active_buffers_[i]);
+    destroyStorage(shm_pool_handle_, fd_, data_, size_);
 
-    idx_ = 0;
+    next_index_ = 0;
     width_ = 0;
     height_ = 0;
     stride_ = 0;
 }
 
 void ShmPool::retireActive() {
-    if (!wl_pool_ && fd_ < 0 && !data_) return;
+    if (!shm_pool_handle_ && fd_ < 0 && !data_) return;
 
-    if (!bufferBusy(bufs_[0]) && !bufferBusy(bufs_[1])) {
+    bool any_busy = false;
+    for (int i = 0; i < kBufferCount; ++i)
+        any_busy |= isBufferBusy(active_buffers_[i]);
+
+    if (!any_busy) {
         destroyActive();
         return;
     }
 
     Retired old;
-    old.wl_pool = wl_pool_;
+    old.shm_pool_handle = shm_pool_handle_;
     old.fd = fd_;
     old.data = data_;
     old.size = size_;
-    old.bufs[0] = std::move(bufs_[0]);
-    old.bufs[1] = std::move(bufs_[1]);
+    for (int i = 0; i < kBufferCount; ++i)
+        old.buffers[i] = std::move(active_buffers_[i]);
 
-    wl_pool_ = nullptr;
+    shm_pool_handle_ = nullptr;
     fd_ = -1;
     data_ = nullptr;
     size_ = 0;
-    idx_ = 0;
+    next_index_ = 0;
     width_ = 0;
     height_ = 0;
     stride_ = 0;
@@ -164,33 +191,49 @@ bool ShmPool::reset(wl_shm* shm, int logical_width, int logical_height, int scal
 
     int width = 0;
     int height = 0;
-    if (!checked_scale(logical_width, scale, &width) ||
-        !checked_scale(logical_height, scale, &height))
+    if (!tryScaleDimension(logical_width, scale, &width) ||
+        !tryScaleDimension(logical_height, scale, &height))
         return false;
 
-    const int stride = cairo_format_stride_for_width(CAIRO_FORMAT_ARGB32, width);
+    int stride = cairo_format_stride_for_width(CAIRO_FORMAT_ARGB32, width);
     if (stride <= 0) return false;
 
-    size_t half = 0;
-    size_t need = 0;
-    if (!checked_mul(static_cast<size_t>(stride), static_cast<size_t>(height), &half) ||
-        !checked_mul(half, 2, &need) ||
-        need > MAX_POOL_SIZE ||
-        need > static_cast<size_t>(std::numeric_limits<int32_t>::max()))
+    // align stride to 256 for optimal compositor udmabuf import
+		// see: https://zamundaaa.github.io/wayland/2026/05/06/making-wl-shm-fast.html
+		// see MR: https://invent.kde.org/plasma/kwin/-/merge_requests/9178
+    constexpr int kStrideAlign = 256;
+    if (stride % kStrideAlign != 0)
+        stride = ((stride / kStrideAlign) + 1) * kStrideAlign;
+
+    size_t per_buffer_size = 0;
+    size_t total_pool_size = 0;
+    if (!tryMultiplySize(static_cast<size_t>(stride), static_cast<size_t>(height), &per_buffer_size) ||
+        !tryMultiplySize(per_buffer_size, kBufferCount, &total_pool_size))
+        return false;
+
+    // align per-buffer size to page boundary for compositor zero-copy import.
+    const long page_size = sysconf(_SC_PAGESIZE);
+    if (page_size > 0 && per_buffer_size % static_cast<size_t>(page_size) != 0)
+        per_buffer_size = ((per_buffer_size + static_cast<size_t>(page_size) - 1) / static_cast<size_t>(page_size)) * static_cast<size_t>(page_size);
+    total_pool_size = per_buffer_size * kBufferCount;
+
+    if (total_pool_size > kMaxPoolSize ||
+        total_pool_size > static_cast<size_t>(std::numeric_limits<int32_t>::max()))
         return false;
 
     purgeRetired();
 
     if (fd_ >= 0 && shm_ == shm && width_ == width && height_ == height &&
-        stride_ == stride && bufs_[0] && bufs_[1])
+        stride_ == stride &&
+        active_buffers_[0] && active_buffers_[1] && active_buffers_[2])
         return true;
 
     retireActive();
 
-    fd_ = make_shm_fd(need);
+    fd_ = createShmFd(total_pool_size);
     if (fd_ < 0) return false;
 
-    data_ = mmap(nullptr, need, PROT_READ | PROT_WRITE, MAP_SHARED, fd_, 0);
+    data_ = mmap(nullptr, total_pool_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd_, 0);
     if (data_ == MAP_FAILED) {
         close(fd_);
         fd_ = -1;
@@ -198,10 +241,10 @@ bool ShmPool::reset(wl_shm* shm, int logical_width, int logical_height, int scal
         return false;
     }
 
-    size_ = need;
+    size_ = total_pool_size;
     shm_ = shm;
-    wl_pool_ = wl_shm_create_pool(shm, fd_, static_cast<int32_t>(need));
-    if (!wl_pool_) {
+    shm_pool_handle_ = wl_shm_create_pool(shm, fd_, static_cast<int32_t>(total_pool_size));
+    if (!shm_pool_handle_) {
         destroyActive();
         return false;
     }
@@ -210,29 +253,29 @@ bool ShmPool::reset(wl_shm* shm, int logical_width, int logical_height, int scal
     height_ = height;
     stride_ = stride;
 
-    for (int i = 0; i < 2; ++i) {
-        const int32_t offset = static_cast<int32_t>(static_cast<size_t>(i) * half);
+    for (int i = 0; i < kBufferCount; ++i) {
+        const int32_t offset = static_cast<int32_t>(static_cast<size_t>(i) * per_buffer_size);
 
-        bufs_[i] = std::make_unique<ShmBuffer>();
-        ShmBuffer& b = *bufs_[i];
+        active_buffers_[i] = std::make_unique<ShmBuffer>();
+        ShmBuffer& b = *active_buffers_[i];
 
-        b.wl = wl_shm_pool_create_buffer(
-            wl_pool_, offset, width, height, stride, WL_SHM_FORMAT_ARGB8888);
-        if (!b.wl) {
+        b.wl_buffer_handle = wl_shm_pool_create_buffer(
+            shm_pool_handle_, offset, width, height, stride, WL_SHM_FORMAT_ARGB8888);
+        if (!b.wl_buffer_handle) {
             destroyActive();
             return false;
         }
-        wl_buffer_add_listener(b.wl, &buffer_listener, &b);
+        wl_buffer_add_listener(b.wl_buffer_handle, &buffer_listener, &b);
 
-        b.cs = cairo_image_surface_create_for_data(
+        b.cairo_surface = cairo_image_surface_create_for_data(
             static_cast<unsigned char*>(data_) + offset,
             CAIRO_FORMAT_ARGB32, width, height, stride);
-        if (!b.cs || cairo_surface_status(b.cs) != CAIRO_STATUS_SUCCESS) {
+        if (!b.cairo_surface || cairo_surface_status(b.cairo_surface) != CAIRO_STATUS_SUCCESS) {
             destroyActive();
             return false;
         }
 
-        b.cr = cairo_create(b.cs);
+        b.cr = cairo_create(b.cairo_surface);
         if (!b.cr || cairo_status(b.cr) != CAIRO_STATUS_SUCCESS) {
             destroyActive();
             return false;
@@ -241,7 +284,7 @@ bool ShmPool::reset(wl_shm* shm, int logical_width, int logical_height, int scal
         b.busy.store(false, std::memory_order_release);
     }
 
-    idx_ = 0;
+    next_index_ = 0;
     return true;
 }
 
@@ -253,22 +296,44 @@ void ShmPool::destroy() {
     retired_.clear();
 }
 
-ShmBuffer* ShmPool::nextBuffer() {
+ShmBuffer* ShmPool::acquireNextBuffer() {
     purgeRetired();
-    if (!bufs_[0] || !bufs_[1]) return nullptr;
+    for (int i = 0; i < kBufferCount; ++i)
+        if (!active_buffers_[i]) return nullptr;
 
-    ShmBuffer* candidate = bufs_[idx_].get();
-    bool expected = false;
-    if (candidate->busy.compare_exchange_strong(expected, true,
-            std::memory_order_acq_rel, std::memory_order_acquire))
-        return candidate;
-
-    idx_ ^= 1;
-    candidate = bufs_[idx_].get();
-    expected = false;
-    if (candidate->busy.compare_exchange_strong(expected, true,
-            std::memory_order_acq_rel, std::memory_order_acquire))
-        return candidate;
+    for (int i = 0; i < kBufferCount; ++i) {
+        const int idx = (next_index_ + i) % kBufferCount;
+        ShmBuffer* candidate = active_buffers_[idx].get();
+        bool expected = false;
+        if (candidate->busy.compare_exchange_strong(expected, true,
+                std::memory_order_acq_rel, std::memory_order_acquire))
+            return candidate;
+    }
 
     return nullptr;
+}
+
+ShmDamage ShmPool::repairDamageFor(const ShmBuffer& buffer,
+                                   const ShmDamage& current_damage,
+                                   int width,
+                                   int height) const {
+    if (!buffer.content_valid)
+        return fullDamage(width, height);
+
+    ShmDamage repaint = current_damage;
+    extendDamage(repaint, buffer.repair_damage);
+    return repaint;
+}
+
+void ShmPool::recordCommit(ShmBuffer* committed, const ShmDamage& damage) {
+    for (auto& buffer : active_buffers_) {
+        if (!buffer || buffer.get() == committed) continue;
+        if (buffer->content_valid)
+            extendDamage(buffer->repair_damage, damage);
+    }
+
+    if (committed) {
+        committed->content_valid = true;
+        committed->repair_damage = {};
+    }
 }
