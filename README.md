@@ -7,12 +7,15 @@ Interactive region selector for wlroots-based wayland compositors. outputs geome
 
 ## build
 
-deps: `wayland-client`, `wayland-cursor`, `cairo`, `xkbcommon` + generated protocol sources in `out/protocol`
+deps: 
+- `wayland-client` 
+- `wayland-cursor` 
+- `cairo`
+- `xkbcommon` + generated protocol sources in `out/protocol`
 
 ```
+git clone https://codeberg.org/qel/cullpp.git
 ninja
-./cullpp -h
-
 ninja -v install
 ```
 
@@ -20,8 +23,7 @@ ninja -v install
 
 basic:
 ```
-cullpp
-cullpp -v
+cullpp -h
 ```
 
 pipe it:
@@ -104,4 +106,5 @@ or hit up the srht mailing list: [~flnt/list@lists.sr.ht]
 - with command substitution the result prints after wayland teardown completes
 
 ## License under [MIT](LICENSE)
+
 
