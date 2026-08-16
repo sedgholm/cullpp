@@ -1,6 +1,6 @@
 ![cullpp](https://codeberg.org/attachments/11be564e-0619-4a25-b5c2-ce6781a9da89)
 
-![C++23](https://img.shields.io/badge/C%2B%2B17-purple?style=flat-square)
+![C++23](https://img.shields.io/badge/C%2B%2B23-purple?style=flat-square)
 ![Wayland](https://img.shields.io/badge/Wayland-v1.0+-yellow?style=flat-square)
 
 Interactive region selector for wlroots-based wayland compositors. outputs geometry data to stdout.
