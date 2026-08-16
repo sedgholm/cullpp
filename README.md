@@ -1,6 +1,6 @@
 ![cullpp](https://codeberg.org/attachments/11be564e-0619-4a25-b5c2-ce6781a9da89)
 
-![C++17](https://img.shields.io/badge/C%2B%2B17-purple?style=flat-square)
+![C++23](https://img.shields.io/badge/C%2B%2B17-purple?style=flat-square)
 ![Wayland](https://img.shields.io/badge/Wayland-v1.0+-yellow?style=flat-square)
 
 Interactive region selector for wlroots-based wayland compositors. outputs geometry data to stdout.
@@ -106,6 +106,6 @@ or hit up the srht mailing list: [~flnt/list@lists.sr.ht]
 - multi-output is the most sensitive area. test -o, crosshair, and drag-across-monitor on your compositor before shipping
 - with command substitution the result prints after wayland teardown completes
 
-## License under [MIT](LICENSE)
+## License under [MIT](License)
 
 
