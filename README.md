@@ -7,7 +7,8 @@ Interactive region selector for wlroots-based wayland compositors. outputs geome
 
 ## build
 
-deps: 
+deps:
+- [`ninja`](https://ninja-build.org/)
 - `wayland-client` 
 - `wayland-cursor` 
 - `cairo`
