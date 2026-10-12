@@ -12,6 +12,7 @@ deps:
 - `wayland-client` 
 - `wayland-cursor` 
 - `cairo`
+- `pixman`
 - `xkbcommon` + generated protocol sources in `out/protocol`
 
 ```
@@ -30,14 +31,11 @@ cullpp -h
 
 pipe it:
 ```
-wf-recorder -g "$(cullpp)" -f output.mp4
-# upload files
 grim -g "$(cullpp)" - | curl -s -F "files[]=@-" https://uguu.se/upload
 ```
 
 ocr:
 ```
-grim -g "$(cullpp)" -t ppm - | tesseract stdin stdout
 grim -g "$(cullpp)" -t ppm - | tesseract stdin stdout | sed '/^[[:space:]]*$/d'
 ```
 
@@ -97,15 +95,10 @@ CULLPP_RESELECT_MOD=Control cullpp
 
 found a bug? want to patch something? open an issue on codeberg:
 
-https://codeberg.org/qel/cullpp/issues
+https://codeberg.org/jelte/cullpp/issues
 
 or hit up the srht mailing list: [~flnt/list@lists.sr.ht]
 
-## notes
-
-- renderer favors correctness and low-latency input over aggressive repaint tricks
-- multi-output is the most sensitive area. test -o, crosshair, and drag-across-monitor on your compositor before shipping
-- with command substitution the result prints after wayland teardown completes
 
 ## License under [MIT](License)
 
