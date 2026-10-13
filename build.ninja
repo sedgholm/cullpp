@@ -12,8 +12,8 @@ cppflags = -std=c++23 -DCULLPP_VERSION=\"$version\" $
   -Wnon-virtual-dtor -Wold-style-cast -Wuseless-cast $
   $cflags
 
-pkg_inc = $$(pkg-config --cflags wayland-client wayland-cursor xkbcommon cairo)
-pkg_lib = $$(pkg-config --libs wayland-client wayland-cursor xkbcommon cairo)
+pkg_inc = $$(pkg-config --cflags wayland-client wayland-cursor xkbcommon cairo pixman-1)
+pkg_lib = $$(pkg-config --libs wayland-client wayland-cursor xkbcommon cairo pixman-1)
 incflags = -I$builddir/protocol -Iprotocol $pkg_inc
 ldflags = $pkg_lib
 
