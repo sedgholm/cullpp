@@ -7,13 +7,10 @@ Interactive region selector for wlroots-based wayland compositors. outputs geome
 
 ## build
 
-deps:
 - [`ninja`](https://ninja-build.org/)
-- `wayland-client` 
-- `wayland-cursor` 
 - `cairo`
 - `pixman`
-- `xkbcommon` + generated protocol sources in `out/protocol`
+- `xkbcommon`
 
 ```
 git clone https://codeberg.org/qel/cullpp.git
