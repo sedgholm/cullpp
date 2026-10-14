@@ -2,6 +2,7 @@
 #include <wayland-client.h>
 #include <wayland-cursor.h>
 #include <cairo/cairo.h>
+#include <pixman.h>
 #include <xkbcommon/xkbcommon.h>
 #include "shm-pool.hpp"
 #include <sys/mman.h>
@@ -29,8 +30,8 @@ static uint32_t BgColor = 0x4A4A4A57;
 static uint32_t BorderColor = 0x00000000;
 static double BorderWidth = 1.0;
 
-// override at runtime via CULLPP_RESELECT_MOD env var.
-static constexpr const char* DefaultReselectMod = XKB_MOD_NAME_SHIFT; // ALT, LOGO, CRTL
+/* override at runtime via CULLPP_RESELECT_MOD env var. */
+static constexpr const char* DefaultReselectMod = XKB_MOD_NAME_SHIFT; /* ALT, LOGO, CTRL */
 static const char* ReselectMod = nullptr;
 
 #ifdef __cplusplus
@@ -58,6 +59,38 @@ static bool isPointInBox(const Box&b,double px,double py){
 
 struct SnapRect { Box rect; std::string label; bool hovered=false; };
 
+
+struct Region {
+    pixman_region32_t r;
+    Region()  { pixman_region32_init(&r); }
+    ~Region() { pixman_region32_fini(&r); }
+    Region(const Region&) = delete;
+    Region& operator=(const Region& o) { pixman_region32_copy(&r, &o.r); return *this; }
+    void clear()       { pixman_region32_clear(&r); }
+    bool isEmpty()     { return pixman_region32_not_empty(&r) == 0; }
+};
+
+struct Label {
+    std::array<char, 128> text{};
+    double tx = 0, ty = 0;               /* text origin */
+    double bx = 0, by = 0, bw = 0, bh = 0; /* background box */
+    cairo_text_extents_t te{};
+};
+
+struct SceneSnapshot {
+    bool valid = false;                  /* :false:= next frame is a full repaint and full damage */
+    bool has_sel = false;
+    double sx = 0, sy = 0, sw = 0, sh = 0;
+    bool show_dims = false;
+    Label dims_label;
+    bool cross = false;
+    double cx = 0, cy = 0;
+    Label cross_label;
+    std::vector<char> hovered;
+    Region sel_ext;
+    Region cross_ext;
+};
+
 struct Output {
     State*                  st         = nullptr;
     wl_output*              wl_out     = nullptr;
@@ -77,18 +110,7 @@ struct Output {
     bool configured= false;
     bool needs_draw= false;
 
-    // accumulated dirty region in logical coords since last commit.
-    int dirty_l = 0, dirty_t = 0, dirty_r = 0, dirty_b = 0;
-    bool dirty_valid = false;
-
-    // crosshair line positions at last commit
-    double prev_crosshair_x = 0;
-    double prev_crosshair_y = 0;
-    bool   had_crosshair = false;
-
-    cairo_surface_t* bg = nullptr;
-    int bg_w = 0;
-    int bg_h = 0;
+    SceneSnapshot prev;
 };
 
 struct State {
@@ -178,54 +200,51 @@ static bool doesBoxIntersectOutput(const Box& box, const Output* out, double pad
            bottom > out->ly && top < out->ly + out->lh;
 }
 
-static void extendDirtyRegion(Output* out, double dl, double dt, double dr, double db) {
-    int il = std::max(0, static_cast<int>(std::floor(dl)));
-    int it = std::max(0, static_cast<int>(std::floor(dt)));
-    int ir = std::min(out->surf_w, static_cast<int>(std::ceil(dr)));
-    int ib = std::min(out->surf_h, static_cast<int>(std::ceil(db)));
-    if (ir <= il || ib <= it) return;
-    if (!out->dirty_valid) {
-        out->dirty_l = il; out->dirty_t = it;
-        out->dirty_r = ir; out->dirty_b = ib;
-        out->dirty_valid = true;
-    } else {
-        out->dirty_l = std::min(out->dirty_l, il);
-        out->dirty_t = std::min(out->dirty_t, it);
-        out->dirty_r = std::max(out->dirty_r, ir);
-        out->dirty_b = std::max(out->dirty_b, ib);
+static const char* outName(const Output* o) {
+    return (o && !o->name.empty()) ? o->name.c_str() : "-";
+}
+
+static const char* buttonName(uint32_t b, char* buf, size_t n) {
+    switch (b) {
+    case BTN_LEFT:   return "BTN_LEFT";
+    case BTN_RIGHT:  return "BTN_RIGHT";
+    case BTN_MIDDLE: return "BTN_MIDDLE";
+    default: snprintf(buf, n, "0x%x", b); return buf;
     }
 }
 
-static void extendCrosshairDamage(Output* out, double cx, double cy) {
+static void logHover(size_t i, const SnapRect& sn, bool now_hovered, const char* label) {
+    char w[24];
+    snprintf(w, sizeof w, "snap %zu", i);
+    if (now_hovered)
+        dlog::line("hover", w, "%.0f,%.0f %.0fx%.0f  %s",
+                   sn.rect.x, sn.rect.y, sn.rect.w, sn.rect.h, label);
+    else
+        dlog::line("unhover", w, "%s", "");
+}
 
-    constexpr int LINE_HALF = 3;
-    extendDirtyRegion(out, 0, cy - LINE_HALF, out->lw, cy + LINE_HALF);
-    extendDirtyRegion(out, cx - LINE_HALF, 0, cx + LINE_HALF, out->lh);
-
-    constexpr int LABEL_W = 260;
-    extendDirtyRegion(out, cx + 9, cy - 28, cx + 9 + LABEL_W, cy + 6);
+static void logResult(const State* st, const std::string& text) {
+    if (dlog::level < 1) return;
+    char q[160];
+    std::string t = text;
+    while (!t.empty() && (t.back() == '\n' || t.back() == '\r')) t.pop_back();
+    snprintf(q, sizeof q, "\"%s\"", t.c_str());
+    dlog::line("out", q, "%.2f,%.2f %.2fx%.2f", st->result.x, st->result.y, st->result.w, st->result.h);
 }
 
 static void requestDrawOutput(Output* out) {
     if (out) out->needs_draw = true;
 }
 
-static void requestFullOutputRedraw(Output* out) {
-    if (!out) return;
-    out->needs_draw = true;
-    extendDirtyRegion(out, 0, 0, out->surf_w, out->surf_h);
+static void requestDrawAll(State* st) {
+    for (auto* out : st->outputs) out->needs_draw = true;
 }
 
+/* renderOutput() works out *what* changed by diffing the
+scene against the last committed one, so no dirty rectangles are accumulated here. */
 static void requestBoxRedraw(State* st, const Box& box, double pad = 0.0) {
-    for (auto* out : st->outputs) {
-        if (!doesBoxIntersectOutput(box, out, pad)) continue;
-        out->needs_draw = true;
-        extendDirtyRegion(out,
-            box.x - pad - out->lx,
-            box.y - pad - out->ly,
-            box.x + box.w + pad - out->lx,
-            box.y + box.h + pad - out->ly);
-    }
+    for (auto* out : st->outputs)
+        if (doesBoxIntersectOutput(box, out, pad)) out->needs_draw = true;
 }
 
 static double getSelectionDamagePadding() {
@@ -237,36 +256,6 @@ static int32_t toScaledExtent(int value, int scale) {
     if (value > std::numeric_limits<int32_t>::max() / scale)
         return std::numeric_limits<int32_t>::max();
     return value * scale;
-}
-
-static ShmDamage fullOutputDamage(const Output* out) {
-    if (!out || out->surf_w <= 0 || out->surf_h <= 0) return {};
-    return {0, 0, out->surf_w, out->surf_h};
-}
-
-static bool isFullOutputDamage(const Output* out, const ShmDamage& damage) {
-    return out && damage.x == 0 && damage.y == 0 &&
-        damage.width >= out->surf_w && damage.height >= out->surf_h;
-}
-
-static ShmDamage currentOutputDamage(Output* out) {
-    if (!out->dirty_valid)
-        return fullOutputDamage(out);
-
-    constexpr int kDamageMargin = 20;
-    const int left = std::max(0, out->dirty_l - kDamageMargin);
-    const int top = std::max(0, out->dirty_t - kDamageMargin);
-    const int right = std::min(out->surf_w, out->dirty_r + kDamageMargin);
-    const int bottom = std::min(out->surf_h, out->dirty_b + kDamageMargin);
-    const int width = right - left;
-    const int height = bottom - top;
-
-    if (width <= 0 || height <= 0)
-        return fullOutputDamage(out);
-    if (width > out->surf_w / 2 || height > out->surf_h / 2)
-        return fullOutputDamage(out);
-
-    return {left, top, width, height};
 }
 
 static void unmapOutputs(State* st) {
@@ -282,37 +271,172 @@ static void unmapOutputs(State* st) {
     wl_display_flush(st->display);
 }
 
-static void rebuildBackground(Output* out) {
-    if (out->surf_w <= 0 || out->surf_h <= 0 || out->scale <= 0) return;
 
-    const int bw = out->surf_w * out->scale;
-    const int bh = out->surf_h * out->scale;
+/* floor  ceil   pad  clamped to the output */
+static void addRect(pixman_region32_t* r, const Output* out,
+                    double x, double y, double w, double h, int pad) {
+    const int x1 = std::max(0, static_cast<int>(std::floor(x)) - pad);
+    const int y1 = std::max(0, static_cast<int>(std::floor(y)) - pad);
+    const int x2 = std::min(out->surf_w, static_cast<int>(std::ceil(x + w)) + pad);
+    const int y2 = std::min(out->surf_h, static_cast<int>(std::ceil(y + h)) + pad);
+    if (x2 > x1 && y2 > y1)
+        pixman_region32_union_rect(r, r, x1, y1,
+            static_cast<unsigned>(x2 - x1), static_cast<unsigned>(y2 - y1));
+}
 
-    if (out->bg && out->bg_w == bw && out->bg_h == bh)
-        return;
+static void addLabelExtents(pixman_region32_t* r, const Output* out, const Label& l) {
+    addRect(r, out, l.bx, l.by, l.bw, l.bh, 3);
+    addRect(r, out, l.tx + l.te.x_bearing, l.ty + l.te.y_bearing, l.te.width, l.te.height, 3);
+}
 
-    if (out->bg) {
-        cairo_surface_destroy(out->bg);
-        out->bg = nullptr;
+
+static Label layoutCrosshairLabel(cairo_t* cr, const State* st, const Output* out,
+                                  double cx, double cy) {
+    Label l;
+    if (st->pressing && st->has_sel) {
+        snprintf(l.text.data(), l.text.size(), "%dx%d",
+            static_cast<int>(st->sel.w), static_cast<int>(st->sel.h));
+    } else if (st->pressing) {
+        const int dx = static_cast<int>(std::abs(st->cur_x - st->anchor_x));
+        const int dy = static_cast<int>(std::abs(st->cur_y - st->anchor_y));
+        snprintf(l.text.data(), l.text.size(), "%d, %d  +%dx%d",
+            static_cast<int>(st->cur_x), static_cast<int>(st->cur_y), dx, dy);
+    } else {
+        snprintf(l.text.data(), l.text.size(), "%d, %d",
+            static_cast<int>(st->cur_x), static_cast<int>(st->cur_y));
+    }
+    cairo_set_font_face(cr, st->mono_font);
+    cairo_set_font_size(cr, 11.0);
+    cairo_text_extents(cr, l.text.data(), &l.te);
+    double tx = cx + 12;
+    double ty = cy - 8;
+    if (tx + l.te.width + 6 > out->lw) tx = cx - l.te.width - 12;
+    if (ty - l.te.height < 0) ty = cy + l.te.height + 14;
+    if (tx < 0) tx = cx + 12;
+    tx = std::floor(tx + 0.5);   // whole-pixel origin: deterministic glyph raster, clipped or not
+    ty = std::floor(ty + 0.5);
+    double padw = l.te.width + 6;
+    const double padh = l.te.height + 4;
+    if (st->pressing) padw += 30;
+    l.tx = tx; l.ty = ty;
+    l.bx = tx - 3; l.by = ty - l.te.height - 2; l.bw = padw; l.bh = padh;
+    return l;
+}
+
+static Label layoutDimsLabel(cairo_t* cr, const State* st, const Output* out,
+                             double sx, double sy) {
+    Label l;
+    snprintf(l.text.data(), l.text.size(), "%d × %d",
+        static_cast<int>(st->sel.w), static_cast<int>(st->sel.h));
+    cairo_set_font_face(cr, st->ui_font);
+    cairo_set_font_size(cr, 13.0);
+    cairo_text_extents(cr, l.text.data(), &l.te);
+    double tx = sx + st->sel.w + 10;
+    double ty = sy + st->sel.h + 10 + l.te.height;
+    if (tx + l.te.width + 8 > out->lw) tx = sx - l.te.width - 14;
+    if (ty + 4 > out->lh)              ty = sy - 8;
+    if (tx < 0)                        tx = sx + 4;
+    if (ty - l.te.height < 0)          ty = sy + l.te.height + 4;
+    tx = std::floor(tx + 0.5);   /* whole-pixel origin [crosshair label] */
+    ty = std::floor(ty + 0.5);
+    constexpr double lp = 4;
+    l.tx = tx; l.ty = ty;
+    l.bx = tx - lp; l.by = ty - l.te.height - lp;
+    l.bw = l.te.width + lp * 2; l.bh = l.te.height + lp * 2;
+    return l;
+}
+
+static bool isBorderVisible() { return (BorderColor & 0xFF) != 0; }
+
+static void buildScene(cairo_t* cr, const State* st, const Output* out, SceneSnapshot& s) {
+    s.valid = true;
+
+    if (st->has_sel) {
+        s.has_sel = true;
+        s.sx = st->sel.x - out->lx;
+        s.sy = st->sel.y - out->ly;
+        s.sw = st->sel.w;
+        s.sh = st->sel.h;
+
+        /* Edge band covers that +-1px uncertainty. */
+        {
+            const int p = isBorderVisible() ? static_cast<int>(std::ceil(BorderWidth / 2.0)) + 2 : 2;
+            Region inner;
+            addRect(&s.sel_ext.r, out, s.sx, s.sy, s.sw, s.sh, p);
+            if (s.sw > 2 * p && s.sh > 2 * p)
+                addRect(&inner.r, out, s.sx + p, s.sy + p, s.sw - 2 * p, s.sh - 2 * p, 0);
+            pixman_region32_subtract(&s.sel_ext.r, &s.sel_ext.r, &inner.r);
+        }
+        if (st->show_dims) {
+            s.show_dims = true;
+            s.dims_label = layoutDimsLabel(cr, st, out, s.sx, s.sy);
+            addLabelExtents(&s.sel_ext.r, out, s.dims_label);
+        }
     }
 
-    out->bg = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, bw, bh);
-    if (cairo_surface_status(out->bg) != CAIRO_STATUS_SUCCESS) {
-        cairo_surface_destroy(out->bg);
-        out->bg = nullptr;
+    const double cx = st->cur_x - out->lx;
+    const double cy = st->cur_y - out->ly;
+    if (st->crosshair && cx >= 0 && cx < out->lw && cy >= 0 && cy < out->lh) {
+        s.cross = true;
+        s.cx = cx;
+        s.cy = cy;
+        s.cross_label = layoutCrosshairLabel(cr, st, out, cx, cy);
+        addRect(&s.cross_ext.r, out, 0, cy - 1, out->lw, 4, 0);
+        addRect(&s.cross_ext.r, out, cx - 1, 0, 4, out->lh, 0);
+        addLabelExtents(&s.cross_ext.r, out, s.cross_label);
+    }
+
+    s.hovered.reserve(st->snaps.size());
+    for (const auto& sn : st->snaps) s.hovered.push_back(sn.hovered ? 1 : 0);
+}
+
+static bool sameLabel(const Label& a, const Label& b) {
+    return strcmp(a.text.data(), b.text.data()) == 0 &&
+           a.tx == b.tx && a.ty == b.ty && a.bw == b.bw && a.bh == b.bh;
+}
+
+
+static void computeDamage(const State* st, const Output* out,
+                          const SceneSnapshot& prev, const SceneSnapshot& cur, Region& dmg) {
+#ifdef CULLPP_ORACLE   // test build: always full repaint with full damage
+    const bool force_full = true;
+#else
+    const bool force_full = !prev.valid;
+#endif
+    if (force_full || prev.hovered.size() != cur.hovered.size()) {
+        pixman_region32_union_rect(&dmg.r, &dmg.r, 0, 0,
+            static_cast<unsigned>(out->surf_w), static_cast<unsigned>(out->surf_h));
         return;
     }
-    out->bg_w = bw;
-    out->bg_h = bh;
 
-    cairo_t* bg_cr = cairo_create(out->bg);
-    cairo_scale(bg_cr, static_cast<double>(out->scale), static_cast<double>(out->scale));
+    const bool sel_changed = prev.has_sel != cur.has_sel ||
+        (cur.has_sel && (prev.sx != cur.sx || prev.sy != cur.sy ||
+                         prev.sw != cur.sw || prev.sh != cur.sh));
+    if (sel_changed) {
+        Region hp, hc, t;
+        if (prev.has_sel) addRect(&hp.r, out, prev.sx, prev.sy, prev.sw, prev.sh, 0);
+        if (cur.has_sel)  addRect(&hc.r, out, cur.sx, cur.sy, cur.sw, cur.sh, 0);
+        pixman_region32_subtract(&t.r, &hp.r, &hc.r);   // hole that closed
+        pixman_region32_union(&dmg.r, &dmg.r, &t.r);
+        pixman_region32_subtract(&t.r, &hc.r, &hp.r);   // hole that opened
+        pixman_region32_union(&dmg.r, &dmg.r, &t.r);
+        pixman_region32_union(&dmg.r, &dmg.r, &prev.sel_ext.r);
+        pixman_region32_union(&dmg.r, &dmg.r, &cur.sel_ext.r);
+    }
 
-    cairo_set_operator(bg_cr, CAIRO_OPERATOR_SOURCE);
-    setSourceColorU32(bg_cr, BgColor);
-    cairo_paint(bg_cr);
+    const bool cross_changed = prev.cross != cur.cross ||
+        (cur.cross && (prev.cx != cur.cx || prev.cy != cur.cy ||
+                       !sameLabel(prev.cross_label, cur.cross_label)));
+    if (cross_changed) {
+        pixman_region32_union(&dmg.r, &dmg.r, &prev.cross_ext.r);
+        pixman_region32_union(&dmg.r, &dmg.r, &cur.cross_ext.r);
+    }
 
-    cairo_destroy(bg_cr);
+    for (size_t i = 0; i < cur.hovered.size(); ++i) {
+        if (prev.hovered[i] == cur.hovered[i]) continue;
+        const Box& b = st->snaps[i].rect;
+        addRect(&dmg.r, out, b.x - out->lx, b.y - out->ly, b.w, b.h, 2);
+    }
 }
 
 static bool renderOutput(Output* out) {
@@ -320,11 +444,14 @@ static bool renderOutput(Output* out) {
     if (!out->configured) [[unlikely]] return false;
 
     out->needs_draw = false;
-    if (st->verbose) [[unlikely]] fprintf(stderr, "RENDER: output %p geo=(%d,%d %dx%d) sel=%d pressing=%d\n",
-        static_cast<void*>(out), out->lx, out->ly, out->lw, out->lh, st->has_sel, st->pressing);
+    const double t_render = dlog::level >= 1 ? dlog::nowMs() : 0.0;
 
     ShmBuffer* pb = out->pool.acquireNextBuffer();
-    if (!pb) [[unlikely]] { out->needs_draw = true; return false; }  // all buffers in-flight
+    if (!pb) [[unlikely]] {   // all buffers in-flight
+        LOG_V("skip", outName(out), "no free buffer");
+        out->needs_draw = true;
+        return false;
+    }
 
     cairo_t* cr = pb->cr;
     if (!cr) [[unlikely]] {
@@ -333,56 +460,66 @@ static bool renderOutput(Output* out) {
         return false;
     }
 
-    // apply HiDPI scale so all drawing coords are logical pixels.
+    /* apply HiDPI scale so all drawing coords are logical pixels. */
     cairo_reset_clip(cr);
     cairo_new_path(cr);
     cairo_identity_matrix(cr);
     cairo_scale(cr, static_cast<double>(out->scale), static_cast<double>(out->scale));
 
-    // compute damage region and only blit/composite pixels that changed.
-    rebuildBackground(out);
+    SceneSnapshot cur;
+    buildScene(cr, st, out, cur);
 
-    // extend dirty region for crosshair line position changes,
-    // so we never need full_damage just because the crosshair moved.
-    const double cur_cx = st->cur_x - out->lx;
-    const double cur_cy = st->cur_y - out->ly;
-    const bool crosshair_in_out = st->crosshair
-        && cur_cx >= 0 && cur_cx < out->lw
-        && cur_cy >= 0 && cur_cy < out->lh;
-    if (crosshair_in_out || out->had_crosshair) {
-        if (out->had_crosshair)
-            extendCrosshairDamage(out, out->prev_crosshair_x, out->prev_crosshair_y);
-        if (crosshair_in_out)
-            extendCrosshairDamage(out, cur_cx, cur_cy);
+    Region dmg;
+    computeDamage(st, out, out->prev, cur, dmg);
+    if (dmg.isEmpty()) {
+        pb->busy.store(false, std::memory_order_release);
+        return false;
     }
 
-    const ShmDamage commit_damage = currentOutputDamage(out);
-    const ShmDamage repaint_damage = out->pool.repairDamageFor(*pb, commit_damage, out->surf_w, out->surf_h);
-    const bool repaint_all = isFullOutputDamage(out, repaint_damage);
+    /* bound the request count */
+    constexpr int kMaxDamageRects = 24;
+    if (pixman_region32_n_rects(&dmg.r) > kMaxDamageRects) {
+        const pixman_box32_t e = *pixman_region32_extents(&dmg.r);
+        dmg.clear();
+        pixman_region32_union_rect(&dmg.r, &dmg.r, e.x1, e.y1,
+            static_cast<unsigned>(e.x2 - e.x1), static_cast<unsigned>(e.y2 - e.y1));
+    }
+
+    Region repaint;
+    out->pool.repaintRegionFor(*pb, &dmg.r, out->surf_w, out->surf_h, &repaint.r);
+
+    const pixman_box32_t* ext = pixman_region32_extents(&repaint.r);
+    const bool repaint_all = pixman_region32_n_rects(&repaint.r) == 1 &&
+        ext->x1 <= 0 && ext->y1 <= 0 && ext->x2 >= out->surf_w && ext->y2 >= out->surf_h;
 
     if (!repaint_all) {
-        cairo_rectangle(cr, repaint_damage.x, repaint_damage.y,
-            repaint_damage.width, repaint_damage.height);
+        int n = 0;
+        const pixman_box32_t* rects = pixman_region32_rectangles(&repaint.r, &n);
+        for (int i = 0; i < n; ++i)
+            cairo_rectangle(cr, rects[i].x1, rects[i].y1,
+                rects[i].x2 - rects[i].x1, rects[i].y2 - rects[i].y1);
         cairo_clip(cr);
     }
-    if (out->bg) {
-        cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
-        cairo_set_source_surface(cr, out->bg, 0, 0);
-        cairo_paint(cr);
-    } else {
-        cairo_set_antialias(cr, CAIRO_ANTIALIAS_NONE);
-        cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
-        setSourceColorU32(cr, BgColor);
-        cairo_paint(cr);
-    }
-    cairo_set_antialias(cr, CAIRO_ANTIALIAS_NONE);
 
-    // draw all snap outlines; bg cache has only solid color.
-    for (const auto& sn : st->snaps) {
+
+    cairo_set_antialias(cr, CAIRO_ANTIALIAS_NONE);
+    cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
+    setSourceColorU32(cr, BgColor);
+    cairo_paint(cr);
+
+    /* draw snap outlines and skip the ones entirely outside the repaint region */
+    for (size_t i = 0; i < st->snaps.size(); ++i) {
+        const auto& sn = st->snaps[i];
         const double rx = sn.rect.x - out->lx;
         const double ry = sn.rect.y - out->ly;
         const double rw = sn.rect.w;
         const double rh = sn.rect.h;
+        if (!repaint_all) {
+            const pixman_box32_t box = {
+                static_cast<int32_t>(std::floor(rx)) - 2, static_cast<int32_t>(std::floor(ry)) - 2,
+                static_cast<int32_t>(std::ceil(rx + rw)) + 2, static_cast<int32_t>(std::ceil(ry + rh)) + 2 };
+            if (pixman_region32_contains_rectangle(&repaint.r, &box) == PIXMAN_REGION_OUT) continue;
+        }
         if (sn.hovered) {
             cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
             cairo_set_source_rgba(cr, 0.27, 1.0, 0.27, 0.22);
@@ -396,100 +533,54 @@ static bool renderOutput(Output* out) {
         cairo_stroke(cr);
     }
 
-    if (st->has_sel) {
-        double sx = st->sel.x - out->lx;
-        double sy = st->sel.y - out->ly;
+    if (cur.has_sel) {
         cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
         cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.0);
-        cairo_rectangle(cr, sx, sy, st->sel.w, st->sel.h);
+        cairo_rectangle(cr, cur.sx, cur.sy, cur.sw, cur.sh);
         cairo_fill(cr);
-        cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
-        setSourceColorU32(cr, BorderColor);
-        cairo_set_line_width(cr, BorderWidth);
+        if (isBorderVisible()) {   /* skip the no-op stroke */
+            cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+            setSourceColorU32(cr, BorderColor);
+            cairo_set_line_width(cr, BorderWidth);
+            cairo_rectangle(cr, cur.sx, cur.sy, cur.sw, cur.sh);
+            cairo_stroke(cr);
+        }
 
-        cairo_rectangle(cr, sx, sy, st->sel.w, st->sel.h);
-        cairo_stroke(cr);
-
-		/* white corners */
-        // cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.82);
-        // const double hs = 3.0;
-        // const double gcx[4] = { sx, sx+st->sel.w-hs, sx, sx+st->sel.w-hs };
-        // const double gcy[4] = { sy, sy, sy+st->sel.h-hs, sy+st->sel.h-hs };
-        // for (int i = 0; i < 4; i++) {
-        //     cairo_rectangle(cr, gcx[i], gcy[i], hs, hs);
-        //     cairo_fill(cr);
-        // }
-
-        if (st->show_dims) {
-            std::array<char, 64> s{};
-            snprintf(s.data(), s.size(), "%d × %d", static_cast<int>(st->sel.w), static_cast<int>(st->sel.h));
+        if (cur.show_dims) {
+            const Label& l = cur.dims_label;
             cairo_set_font_face(cr, st->ui_font);
             cairo_set_font_size(cr, 13.0);
-            cairo_text_extents_t te;
-            cairo_text_extents(cr, s.data(), &te);
-            double tx = sx + st->sel.w + 10;
-            double ty = sy + st->sel.h + 10 + te.height;
-            if (tx + te.width + 8 > out->lw) tx = sx - te.width - 14;
-            if (ty + 4 > out->lh)             ty = sy - 8;
-            if (tx < 0)                       tx = sx + 4;
-            if (ty - te.height < 0)           ty = sy + te.height + 4;
             cairo_set_source_rgba(cr, 0, 0, 0, 0.72);
-            const double lp=4;
-            cairo_rectangle(cr, tx-lp, ty-te.height-lp, te.width+lp*2, te.height+lp*2);
+            cairo_rectangle(cr, l.bx, l.by, l.bw, l.bh);
             cairo_fill(cr);
             cairo_set_source_rgba(cr, 1, 1, 1, 1);
-            cairo_move_to(cr, tx, ty);
-            cairo_show_text(cr, s.data());
+            cairo_move_to(cr, l.tx, l.ty);
+            cairo_show_text(cr, l.text.data());
         }
     }
 
-    if (st->crosshair) {
-        double cx = st->cur_x - out->lx;
-        double cy = st->cur_y - out->ly;
-        if (cx>=0&&cx<out->lw&&cy>=0&&cy<out->lh) {
-            cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
-            cairo_set_source_rgba(cr, 1, 1, 1, 0.5);
-            cairo_set_line_width(cr, 1.0);
-            cairo_move_to(cr, 0.5,   cy+0.5); cairo_line_to(cr, out->lw, cy+0.5);
-            cairo_move_to(cr, cx+0.5, 0.5);   cairo_line_to(cr, cx+0.5, out->lh);
-            cairo_stroke(cr);
+    if (cur.cross) {
+        cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+        cairo_set_source_rgba(cr, 1, 1, 1, 0.5);
+        cairo_set_line_width(cr, 1.0);
+        cairo_move_to(cr, 0.5,         cur.cy + 0.5); cairo_line_to(cr, out->lw, cur.cy + 0.5);
+        cairo_move_to(cr, cur.cx + 0.5, 0.5);         cairo_line_to(cr, cur.cx + 0.5, out->lh);
+        cairo_stroke(cr);
 
-            std::array<char, 128> s{};
-            if (st->pressing && st->has_sel) {
-                snprintf(s.data(), s.size(), "%dx%d",
-                    static_cast<int>(st->sel.w), static_cast<int>(st->sel.h));
-            } else if (st->pressing) {
-                int dx = static_cast<int>(std::abs(st->cur_x - st->anchor_x));
-                int dy = static_cast<int>(std::abs(st->cur_y - st->anchor_y));
-                snprintf(s.data(), s.size(), "%d, %d  +%dx%d",
-                    static_cast<int>(st->cur_x), static_cast<int>(st->cur_y), dx, dy);
-            } else {
-                snprintf(s.data(), s.size(), "%d, %d", static_cast<int>(st->cur_x), static_cast<int>(st->cur_y));
-            }
-            cairo_set_font_face(cr, st->mono_font);
-            cairo_set_font_size(cr, 11.0);
-            cairo_text_extents_t te;
-            cairo_text_extents(cr, s.data(), &te);
-            double tx = cx + 12;
-            double ty = cy - 8;
-            if (tx + te.width + 6 > out->lw) tx = cx - te.width - 12;
-            if (ty - te.height < 0) ty = cy + te.height + 14;
-            if (tx < 0) tx = cx + 12;
-            cairo_set_source_rgba(cr, 0.1, 0.1, 0.1, 0.85);
-            double padw = te.width + 6;
-            double padh = te.height + 4;
-            if (st->pressing) padw += 30;
-            cairo_rectangle(cr, tx-3, ty-te.height-2, padw, padh);
-            cairo_fill(cr);
-            cairo_set_source_rgba(cr, 0.0, 1.0, 0.0, 0.95);
-            cairo_move_to(cr, tx, ty);
-            cairo_show_text(cr, s.data());
-        }
+        const Label& l = cur.cross_label;
+        cairo_set_font_face(cr, st->mono_font);
+        cairo_set_font_size(cr, 11.0);
+        cairo_set_source_rgba(cr, 0.1, 0.1, 0.1, 0.85);
+        cairo_rectangle(cr, l.bx, l.by, l.bw, l.bh);
+        cairo_fill(cr);
+        cairo_set_source_rgba(cr, 0.0, 1.0, 0.0, 0.95);
+        cairo_move_to(cr, l.tx, l.ty);
+        cairo_show_text(cr, l.text.data());
     }
 
     cairo_surface_flush(pb->cairo_surface);
 
-    // Only register a new frame callback if one isn't already in-flight.
+    /* Only register a new frame callback if one isn't already in-flight. */
     if (!out->frame_cb) {
         out->frame_cb = wl_surface_frame(out->surface);
         wl_callback_add_listener(out->frame_cb, &frame_listener, out);
@@ -499,19 +590,33 @@ static bool renderOutput(Output* out) {
 
     wl_surface_set_buffer_scale(out->surface, out->scale);
 
-    wl_surface_damage_buffer(out->surface,
-        toScaledExtent(commit_damage.x, out->scale),
-        toScaledExtent(commit_damage.y, out->scale),
-        toScaledExtent(commit_damage.width, out->scale),
-        toScaledExtent(commit_damage.height, out->scale));
+    {
+        int n = 0;
+        const pixman_box32_t* rects = pixman_region32_rectangles(&dmg.r, &n);
+        for (int i = 0; i < n; ++i) {
+            const int32_t bx = toScaledExtent(rects[i].x1, out->scale);
+            const int32_t by = toScaledExtent(rects[i].y1, out->scale);
+            const int32_t bw = toScaledExtent(rects[i].x2 - rects[i].x1, out->scale);
+            const int32_t bh = toScaledExtent(rects[i].y2 - rects[i].y1, out->scale);
+            wl_surface_damage_buffer(out->surface, bx, by, bw, bh);
+        }
+    }
 
     wl_surface_commit(out->surface);
-    out->pool.recordCommit(pb, commit_damage);
+    if (dlog::level >= 1) {
+        const pixman_box32_t* de = pixman_region32_extents(&dmg.r);
+        const int dn = pixman_region32_n_rects(&dmg.r);
+        const bool dmg_full = dn == 1 && de->x1 <= 0 && de->y1 <= 0 &&
+                              de->x2 >= out->surf_w && de->y2 >= out->surf_h;
+        char what[24];
+        if (dmg_full) snprintf(what, sizeof what, "full");
+        else          snprintf(what, sizeof what, "%d rect%s", dn, dn == 1 ? "" : "s");
+        dlog::line("commit", outName(out), "buf %d  %s%s  <%.6f>", pb->index, what,
+                   (repaint_all && !dmg_full) ? "  paint full" : "", dlog::since(t_render));
+    }
+    out->pool.recordCommit(pb, &dmg.r);
     out->pool.advanceIndex();
-    out->dirty_valid = false;
-    out->had_crosshair = crosshair_in_out;
-    out->prev_crosshair_x = cur_cx;
-    out->prev_crosshair_y = cur_cy;
+    out->prev = cur;
     return true;
 }
 
@@ -528,6 +633,7 @@ static void onLayerSurfaceConfigure(void* data, zwlr_layer_surface_v1* ls,
                           uint32_t serial, uint32_t w, uint32_t h) {
     auto* out = static_cast<Output*>(data);
     zwlr_layer_surface_v1_ack_configure(ls, serial);
+    LOG_V("configure", outName(out), "%ux%u  serial %u", w, h, serial);
 
     if (w > static_cast<uint32_t>(std::numeric_limits<int>::max()) ||
         h > static_cast<uint32_t>(std::numeric_limits<int>::max())) {
@@ -543,6 +649,7 @@ static void onLayerSurfaceConfigure(void* data, zwlr_layer_surface_v1* ls,
         out->st->running = false;
         return;
     }
+    out->prev.valid = false;
     out->configured = true;
     out->needs_draw  = true;
 }
@@ -627,10 +734,6 @@ static void destroyOutput(Output* out) {
         if (seat->ptr_out == out)
             seat->ptr_out = nullptr;
 
-    if (out->bg) {
-        cairo_surface_destroy(out->bg);
-        out->bg = nullptr;
-    }
     if (out->frame_cb) {
         wl_callback_destroy(out->frame_cb);
         out->frame_cb = nullptr;
@@ -721,15 +824,20 @@ static void onPointerEnter(void* d, wl_pointer*, uint32_t ser,
             const double gx = out->lx + wl_fixed_to_double(sx);
             const double gy = out->ly + wl_fixed_to_double(sy);
             st->cur_x = gx; st->cur_y = gy;
-            for (auto& sn:st->snaps) {
+            LOG_V("enter", outName(out), "%.2f %.2f", gx, gy);
+            for (size_t i = 0; i < st->snaps.size(); ++i) {
+                auto& sn = st->snaps[i];
                 const bool h = isPointInBox(sn.rect,gx,gy);
-                if (h != sn.hovered)
+                if (h != sn.hovered) {
                     requestBoxRedraw(st, sn.rect);
+                    if (dlog::level >= 1) logHover(i, sn, h, sn.label.c_str());
+                }
                 sn.hovered = h;
             }
             break;
         }
     }
+    if (st->crosshair) requestDrawAll(st);
     setPointerCursor(s, ser);
 }
 static void onPointerLeave(void* d, wl_pointer*, uint32_t, wl_surface*) {
@@ -737,16 +845,19 @@ static void onPointerLeave(void* d, wl_pointer*, uint32_t, wl_surface*) {
     State* st=seat->st;
     Output* leaving = seat->ptr_out;
     seat->ptr_out = nullptr;
+    LOG_V("leave", outName(leaving), "%s", "");
 
-    for (auto& sn:st->snaps) {
+    for (size_t i = 0; i < st->snaps.size(); ++i) {
+        auto& sn = st->snaps[i];
         if (sn.hovered) {
             sn.hovered=false;
             requestBoxRedraw(st, sn.rect);
+            if (dlog::level >= 1) logHover(i, sn, false, "");
         }
     }
 
     if (st->crosshair && leaving)
-        requestDrawOutput(leaving);
+        requestDrawAll(st);
 }
 static void onPointerMotion(void* d, wl_pointer*, uint32_t,
                         wl_fixed_t sx, wl_fixed_t sy) {
@@ -770,11 +881,22 @@ static void onPointerMotion(void* d, wl_pointer*, uint32_t,
             st->sel.w != prev_sel.w || st->sel.h != prev_sel.h ||
             st->has_sel != prev_has_sel;
     }
+    if (dlog::level >= 1) {
+        if (st->pressing && st->has_sel)
+            dlog::line("motion", outName(seat->ptr_out), "%.2f %.2f   sel %.2f %.2f %.2f %.2f",
+                       gx, gy, st->sel.x, st->sel.y, st->sel.w, st->sel.h);
+        else
+            dlog::line("motion", outName(seat->ptr_out), "%.2f %.2f", gx, gy);
+    }
     bool hover_changed = false;
-    for (auto& sn:st->snaps) {
+    for (size_t i = 0; i < st->snaps.size(); ++i) {
+        auto& sn = st->snaps[i];
         const bool hovered = isPointInBox(sn.rect,gx,gy);
         const bool changed = sn.hovered != hovered;
-        if (changed) requestBoxRedraw(st, sn.rect);
+        if (changed) {
+            requestBoxRedraw(st, sn.rect);
+            if (dlog::level >= 1) logHover(i, sn, hovered, sn.label.c_str());
+        }
         hover_changed |= changed;
         sn.hovered = hovered;
     }
@@ -783,23 +905,21 @@ static void onPointerMotion(void* d, wl_pointer*, uint32_t,
         const double pad = getSelectionDamagePadding();
         if (prev_has_sel) requestBoxRedraw(st, prev_sel, pad);
         if (st->has_sel) requestBoxRedraw(st, st->sel, pad);
-        if (st->show_dims)
-            requestFullOutputRedraw(seat->ptr_out);
-        if (st->crosshair)
-            requestDrawOutput(seat->ptr_out);
-        if (st->verbose) fprintf(stderr, "MOTION: sel=(%d,%d %dx%d)\n",
-            static_cast<int>(st->sel.x), static_cast<int>(st->sel.y), static_cast<int>(st->sel.w), static_cast<int>(st->sel.h));
+        if (st->show_dims || st->crosshair)
+            requestDrawAll(st);
     } else if (hover_changed || (st->crosshair && cursor_changed)) {
         if (st->crosshair)
-            requestDrawOutput(seat->ptr_out);
-        if (st->verbose) fprintf(stderr, "MOTION: cursor=(%d,%d) hover_changed=%d\n",
-            static_cast<int>(st->cur_x), static_cast<int>(st->cur_y), hover_changed);
+            requestDrawAll(st);
     }
 }
 static bool emitResultAndContinue(State* st) {
     st->confirmed = true;
     if (!isReselectModifierHeld(st)) { st->running = false; return false; }
-    std::cout << formatResult(st) << std::flush;
+    {
+        const std::string text = formatResult(st);
+        logResult(st, text);
+        std::cout << text << std::flush;
+    }
     st->confirmed = false;
     st->has_sel = false;
     st->sel = {0, 0, 0, 0};
@@ -811,6 +931,12 @@ static void onPointerButton(void* d, wl_pointer*, uint32_t, uint32_t,
                         uint32_t btn, uint32_t state_val) {
     auto* seat = static_cast<Seat*>(d);
     State* st=seat->st;
+    if (dlog::level >= 1) {
+        char nb[16];
+        dlog::line("button", buttonName(btn, nb, sizeof nb), "%-8s  %.2f %.2f",
+                   state_val == WL_POINTER_BUTTON_STATE_PRESSED ? "PRESSED" : "RELEASED",
+                   st->cur_x, st->cur_y);
+    }
     if (btn==BTN_RIGHT && state_val==WL_POINTER_BUTTON_STATE_PRESSED) {
         st->running=false; return;
     }
@@ -819,8 +945,6 @@ static void onPointerButton(void* d, wl_pointer*, uint32_t, uint32_t,
         st->anchor_x=st->cur_x; st->anchor_y=st->cur_y;
         st->pressing=true; st->has_sel=false;
         requestDrawOutput(seat->ptr_out);
-        if (st->verbose) fprintf(stderr, "BUTTON: LMB DOWN at (%d,%d)\n",
-            static_cast<int>(st->cur_x), static_cast<int>(st->cur_y));
     } else {
         const Box cleared_sel = st->sel;
         st->pressing=false;
@@ -894,11 +1018,16 @@ static bool isReselectModifierHeld(State* st) {
 static void onKeyboardKey(void* data, wl_keyboard*, uint32_t, uint32_t, uint32_t keycode, uint32_t key_state) {
     auto* st = static_cast<State*>(data);
     if (key_state != WL_KEYBOARD_KEY_STATE_PRESSED) return;
-    if (!st->xkb_st) return;
+    if (!st->xkb_st) { LOG_V("key", "?", "%u  PRESSED  no keymap", keycode); return; }
     xkb_keycode_t xkb_kc = keycode + 8;
     const xkb_keysym_t* syms;
     int nsyms = xkb_state_key_get_syms(st->xkb_st, xkb_kc, &syms);
     for (int i = 0; i < nsyms; ++i) {
+        if (dlog::level >= 1) {
+            char nm[64];
+            xkb_keysym_get_name(syms[i], nm, sizeof nm);
+            dlog::line("key", nm, "PRESSED");
+        }
         if (syms[i] == XKB_KEY_Escape) {
             st->running = false;
         }
@@ -970,7 +1099,12 @@ static const wl_seat_listener seat_listener={.capabilities=onSeatCapabilities,.n
 
 static void onXdgOutputLogicalPosition (void*d,zxdg_output_v1*,int32_t x,int32_t y){auto*o=static_cast<Output*>(d);o->lx=x;o->ly=y;}
 static void onXdgOutputLogicalSize(void*d,zxdg_output_v1*,int32_t w,int32_t h){auto*o=static_cast<Output*>(d);o->lw=w;o->lh=h;}
-static void onXdgOutputDone(void*,zxdg_output_v1*){}
+static void onXdgOutputDone(void*d,zxdg_output_v1*){
+    auto* o=static_cast<Output*>(d);
+    if (o->st->verbose) fprintf(stderr,
+        "XDG_OUTPUT_DONE: name=%s logical=(%d,%d %dx%d)\n",
+        o->name.c_str(), o->lx, o->ly, o->lw, o->lh);
+}
 static void onXdgOutputName(void*d,zxdg_output_v1*,const char*n){if(n)static_cast<Output*>(d)->name=n;}
 static void onXdgOutputDescription(void*,zxdg_output_v1*,const char*){}
 static const zxdg_output_v1_listener xo_listener={
@@ -979,7 +1113,14 @@ static const zxdg_output_v1_listener xo_listener={
 
 static void onWlOutputGeometry(void*d,wl_output*,int32_t x,int32_t y,int32_t,int32_t,int32_t,const char*,const char*,int32_t){auto*o=static_cast<Output*>(d);o->px=x;o->py=y;}
 static void onWlOutputMode(void*d,wl_output*,uint32_t f,int32_t w,int32_t h,int32_t){if(f&WL_OUTPUT_MODE_CURRENT){auto*o=static_cast<Output*>(d);o->pw=w;o->ph=h;}}
-static void onWlOutputDone(void*d,wl_output*){auto*o=static_cast<Output*>(d);if(o->lw==0&&o->pw>0){o->lx=o->px/o->scale;o->ly=o->py/o->scale;o->lw=o->pw/o->scale;o->lh=o->ph/o->scale;}}
+static void onWlOutputDone(void*d,wl_output*){
+    auto*o=static_cast<Output*>(d);
+    const bool used_fallback = (o->lw==0 && o->pw>0);
+    if (used_fallback) {o->lx=o->px/o->scale; o->ly=o->py/o->scale; o->lw=o->pw/o->scale; o->lh=o->ph/o->scale;}
+    if (o->st->verbose) fprintf(stderr,
+        "WL_OUTPUT_DONE: name=%s physical=(%d,%d %dx%d) scale=%d logical=(%d,%d %dx%d) used_fallback=%d\n",
+        o->name.c_str(), o->px, o->py, o->pw, o->ph, o->scale, o->lx, o->ly, o->lw, o->lh, used_fallback);
+}
 static void onWlOutputScale(void*d,wl_output*,int32_t f){
     auto* o=static_cast<Output*>(d);
     if (f <= 0 || o->scale == f) return;
@@ -993,6 +1134,7 @@ static void onWlOutputScale(void*d,wl_output*,int32_t f){
         o->st->running = false;
         return;
     }
+    o->prev.valid = false;
     requestDrawOutput(o);
 }
 static void onWlOutputName(void*d,wl_output*,const char*n){auto*o=static_cast<Output*>(d);if(o->name.empty()&&n)o->name=n;}
@@ -1058,9 +1200,17 @@ static const wl_registry_listener reg_listener={.global=onRegistryGlobal,.global
 static void parseStdin(State* st) {
     if (!st->force_stdin && isatty(STDIN_FILENO)) return;
     std::string line;
+    int lineno = 0, rejected = 0;
     while (std::getline(std::cin, line)) {
+        ++lineno;
         double x,y,w,h;
-        if (sscanf(line.c_str(), "%lf,%lf %lfx%lf", &x, &y, &w, &h) != 4) continue;
+        if (sscanf(line.c_str(), "%lf,%lf %lfx%lf", &x, &y, &w, &h) != 4) {
+            if (line.find_first_not_of(" \t\r") != std::string::npos) {
+                ++rejected;
+                LOG_V("stdin", "", "line %d: bad rect \"%s\"", lineno, line.c_str());
+            }
+            continue;
+        }
         SnapRect sn; sn.rect={x,y,w,h};
         auto first = line.find(' ');
         if (first != std::string::npos) {
@@ -1071,6 +1221,7 @@ static void parseStdin(State* st) {
         }
         st->snaps.push_back(sn);
     }
+    LOG_V("stdin", "", "%zu rects, %d rejected", st->snaps.size(), rejected);
 }
 
 static std::string formatResult(const State* st) {
@@ -1081,8 +1232,14 @@ static std::string formatResult(const State* st) {
         double ix2=std::min(r.x+r.w,static_cast<double>(o->lx+o->lw));
         double iy2=std::min(r.y+r.h,static_cast<double>(o->ly+o->lh));
         double a=(ix2>ix&&iy2>iy)?(ix2-ix)*(iy2-iy):0;
+        if (st->verbose) fprintf(stderr,
+            "RESULT_CHECK: output=%s logical=%d,%d %dx%d scale=%d overlapArea=%.0f\n",
+            o->name.c_str(), o->lx, o->ly, o->lw, o->lh, o->scale, a);
         if(a>best){best=a;best_out=o;}
     }
+    if (st->verbose) fprintf(stderr,
+        "RESULT_CHECK: final selection=%.0f,%.0f %.0fx%.0f chosenOutput=%s\n",
+        r.x, r.y, r.w, r.h, best_out ? best_out->name.c_str() : "(none)");
     const SnapRect* snap=nullptr;
     {
         /* half-pixel epsilon: int-cast fails for e.g. 1.9 vs 2.0 (floors differ
@@ -1115,6 +1272,7 @@ static std::string formatResult(const State* st) {
 }
 
 int main(int argc, char* argv[]) {
+    dlog::start();
 
 	  //env
     const char* env_mod = getenv("CULLPP_RESELECT_MOD");
@@ -1138,7 +1296,7 @@ int main(int argc, char* argv[]) {
         else if (!strcmp(argv[i],"-p")) st.point_mode =true;
         else if (!strcmp(argv[i],"-o")) st.output_mode=true;
         else if (!strcmp(argv[i],"-r")) st.force_stdin=true;
-        else if (!strcmp(argv[i],"-v")) st.verbose=true;
+        else if (!strcmp(argv[i],"-v")) { st.verbose =false; dlog::level = 1; }
 
 				else if (!strcmp(argv[i],"--bg") && i+1<argc) {
             auto c = parseHexColor(argv[++i]); if (!c.has_value()) return 1; BgColor = c.value();
@@ -1149,6 +1307,8 @@ int main(int argc, char* argv[]) {
         else if (!strcmp(argv[i],"--border-width") && i+1<argc) { char* e=nullptr; double v=strtod(argv[++i],&e); if(e!=argv[i]&&v>0) BorderWidth=v; }
         else if (!strcmp(argv[i],"-h")||!strcmp(argv[i],"--help")) {
             fprintf(stderr,
+
+
                 "Usage: cullpp " CULLPP_VERSION " [options...]\n"
                 "\n"
                 "  -f FORMAT  output format  %%x %%y %%w %%h %%X %%Y %%o %%l\n"
@@ -1157,7 +1317,7 @@ int main(int argc, char* argv[]) {
                 "  -p         point mode\n"
                 "  -o         outputs as snap rects\n"
                 "  -r         read stdin even if tty\n"
-                "  -v         verbose debug output\n"
+                "  -v         log events to stderr\n"
 								"  --bg RRGGBBAA      background color\n"
                 "  --border RRGGBBAA  border color\n"
                 "  --border-width N   border width in pixels\n"
@@ -1207,6 +1367,11 @@ int main(int argc, char* argv[]) {
             if(o->lw>0)
                 st.snaps.push_back({{static_cast<double>(o->lx),static_cast<double>(o->ly),
                                      static_cast<double>(o->lw),static_cast<double>(o->lh)},o->name});
+
+    for (const auto* out:st.outputs)
+        LOG_V("output", outName(out), "%p  wl_output@%u  %d,%d %dx%d @%d",
+              static_cast<const void*>(out), wl_proxy_get_id(reinterpret_cast<wl_proxy*>(out->wl_out)),
+              out->lx, out->ly, out->lw, out->lh, out->scale);
 
     for (auto* out:st.outputs) createOutputSurface(out);
     wl_display_roundtrip(st.display);
@@ -1261,6 +1426,7 @@ done:
     std::string result_text;
     if (st.confirmed) {
         result_text = formatResult(&st);
+        logResult(&st, result_text);
         rc=0;
     }
 
@@ -1289,5 +1455,6 @@ done:
     if (st.mono_font)  cairo_font_face_destroy(st.mono_font);
     wl_display_disconnect(st.display);
     if (!result_text.empty()) std::cout << result_text;
+    LOG_V("exit", "", "%d", rc);
     return rc;
 }

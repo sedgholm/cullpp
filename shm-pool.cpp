@@ -18,12 +18,20 @@ static int createShmFd(size_t size_bytes) {
         return -1;
 
     int fd = static_cast<int>(syscall(SYS_memfd_create, "cullpp-pool", MFD_CLOEXEC));
-    if (fd < 0) return -1;
+    if (fd < 0) {
+        const int e = errno;
+        LOG_ERR("memfd_create", "", "\"cullpp-pool\"  = -1 %s (%s)", dlog::errName(e), strerror(e));
+        return -1;
+    }
 
-    if (posix_fallocate(fd, 0, static_cast<off_t>(size_bytes)) != 0) {
+    const double t0 = dlog::level >= 1 ? dlog::nowMs() : 0.0;
+    const int fa = posix_fallocate(fd, 0, static_cast<off_t>(size_bytes));   /* returns the errno itself */
+    if (fa != 0) {
+        LOG_ERR("fallocate", "", "%zu  = -1 %s (%s)", size_bytes, dlog::errName(fa), strerror(fa));
         close(fd);
         return -1;
     }
+    LOG_V("fallocate", "", "%zu  = 0  <%.6f>", size_bytes, dlog::since(t0));
 
     return fd;
 }
@@ -53,26 +61,6 @@ static bool tryMultiplySize(size_t a, size_t b, size_t* result) {
 
     *result = a * b;
     return true;
-}
-
-static ShmDamage fullDamage(int width, int height) {
-    if (width <= 0 || height <= 0) return {};
-    return {0, 0, width, height};
-}
-
-static void extendDamage(ShmDamage& target, const ShmDamage& damage) {
-    if (damage.empty()) return;
-
-    if (target.empty()) {
-        target = damage;
-        return;
-    }
-
-    const int left = std::min(target.x, damage.x);
-    const int top = std::min(target.y, damage.y);
-    const int right = std::max(target.x + target.width, damage.x + damage.width);
-    const int bottom = std::max(target.y + target.height, damage.y + damage.height);
-    target = {left, top, right - left, bottom - top};
 }
 
 static void destroyStorage(wl_shm_pool*& shm_pool_handle, int& fd, void*& data, size_t& size) {
@@ -235,12 +223,15 @@ bool ShmPool::reset(wl_shm* shm, int logical_width, int logical_height, int scal
 
     data_ = mmap(nullptr, total_pool_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd_, 0);
     if (data_ == MAP_FAILED) {
+        const int e = errno;
+        LOG_ERR("mmap", "", "%zu  = -1 %s (%s)", total_pool_size, dlog::errName(e), strerror(e));
         close(fd_);
         fd_ = -1;
         data_ = nullptr;
         return false;
     }
 
+    LOG_V("mmap", "", "%zu  = %p", total_pool_size, data_);
     size_ = total_pool_size;
     shm_ = shm;
     shm_pool_handle_ = wl_shm_create_pool(shm, fd_, static_cast<int32_t>(total_pool_size));
@@ -258,6 +249,7 @@ bool ShmPool::reset(wl_shm* shm, int logical_width, int logical_height, int scal
 
         active_buffers_[i] = std::make_unique<ShmBuffer>();
         ShmBuffer& b = *active_buffers_[i];
+        b.index = i;
 
         b.wl_buffer_handle = wl_shm_pool_create_buffer(
             shm_pool_handle_, offset, width, height, stride, WL_SHM_FORMAT_ARGB8888);
@@ -279,6 +271,13 @@ bool ShmPool::reset(wl_shm* shm, int logical_width, int logical_height, int scal
         if (!b.cr || cairo_status(b.cr) != CAIRO_STATUS_SUCCESS) {
             destroyActive();
             return false;
+        }
+
+
+        if (cairo_font_options_t* fo = cairo_font_options_create()) {
+            cairo_font_options_set_antialias(fo, CAIRO_ANTIALIAS_GRAY);
+            cairo_set_font_options(b.cr, fo);
+            cairo_font_options_destroy(fo);
         }
 
         b.busy.store(false, std::memory_order_release);
@@ -313,27 +312,27 @@ ShmBuffer* ShmPool::acquireNextBuffer() {
     return nullptr;
 }
 
-ShmDamage ShmPool::repairDamageFor(const ShmBuffer& buffer,
-                                   const ShmDamage& current_damage,
-                                   int width,
-                                   int height) const {
-    if (!buffer.content_valid)
-        return fullDamage(width, height);
-
-    ShmDamage repaint = current_damage;
-    extendDamage(repaint, buffer.repair_damage);
-    return repaint;
+void ShmPool::repaintRegionFor(const ShmBuffer& buffer, const pixman_region32_t* damage,
+                               int width, int height, pixman_region32_t* out) const {
+    if (!buffer.content_valid) {
+        pixman_region32_clear(out);
+        if (width > 0 && height > 0)
+            pixman_region32_union_rect(out, out, 0, 0,
+                static_cast<unsigned>(width), static_cast<unsigned>(height));
+        return;
+    }
+    pixman_region32_union(out, damage, &buffer.repair);
 }
 
-void ShmPool::recordCommit(ShmBuffer* committed, const ShmDamage& damage) {
+void ShmPool::recordCommit(ShmBuffer* committed, const pixman_region32_t* damage) {
     for (auto& buffer : active_buffers_) {
         if (!buffer || buffer.get() == committed) continue;
         if (buffer->content_valid)
-            extendDamage(buffer->repair_damage, damage);
+            pixman_region32_union(&buffer->repair, &buffer->repair, damage);
     }
 
     if (committed) {
         committed->content_valid = true;
-        committed->repair_damage = {};
+        pixman_region32_clear(&committed->repair);
     }
 }
